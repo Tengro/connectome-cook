@@ -1,31 +1,38 @@
 /**
  * Vendored from connectome-host: forking-knowledge-miner/src/recipe.ts
  * Sync source: github.com/anima-research/connectome-host
- * Last synced: commit 6273370 (feat(recipe): add source metadata for build/deploy tooling)
+ * Last synced: commit a111e79 (merge of upstream/main into feat/recipe-source-metadata,
+ *              brings in `fix(recipe): resolve fleet children[].recipe against parent
+ *              recipe dir` + enabledTools/disabledTools + activity module config).
  *
  * Why vendored: connectome-host isn't published to npm, so cook can't depend
  * on it directly. The recipe schema is small and stable enough that
- * duplicating ~200 LoC is cheaper than wrangling a git/file dep. Re-sync this
+ * duplicating ~300 LoC is cheaper than wrangling a git/file dep. Re-sync this
  * file when the upstream schema evolves; the surface that matters for cook is:
  *
  *   - Type exports (Recipe + nested types)
  *   - validateRecipe() — structural validation
  *   - loadRecipeRaw() — read+parse+validate WITHOUT env-substitution
+ *   - resolveRecipeRelative() — parent-dir-relative path resolution helper,
+ *     used by walker.ts to traverse fleet children
  *
  * Two deliberate divergences from upstream:
  *
  *   1. We expose loadRecipeRaw() instead of loadRecipe(). Cook needs to scan
  *      raw recipe JSON for ${VAR} patterns BEFORE substitution (so we can
  *      prompt the operator for missing values), and never wants to fetch
- *      remote system-prompt URLs at build time.
+ *      remote system-prompt URLs at build time. loadRecipeRaw also skips
+ *      the resolveChildRecipePaths side-effect — walker.ts wants raw paths
+ *      so it can drive its own traversal/dedup.
  *
- *   2. RecipeModules.wake is loosened from `GateConfig` to `Record<string,
- *      unknown>`. We don't depend on @animalabs/agent-framework, and cook
- *      doesn't introspect wake's internals — only enabled-yes-or-no.
+ *   2. RecipeModules.wake is loosened from `GateConfig` (which lives in
+ *      @animalabs/agent-framework, a runtime-only dep) to `Record<string,
+ *      unknown>`. Cook only cares whether wake is enabled, not its config
+ *      shape.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,6 +64,10 @@ export interface RecipeMcpServer {
   toolPrefix?: string;
   enabledFeatureSets?: string[];
   disabledFeatureSets?: string[];
+  /** Tool allow-list; `*` is a substring wildcard. */
+  enabledTools?: string[];
+  /** Tool deny-list; wins over enabledTools on overlap. */
+  disabledTools?: string[];
   reconnect?: boolean;
   reconnectIntervalMs?: number;
   channelSubscription?: 'auto' | 'manual' | string[];
@@ -86,12 +97,20 @@ export interface RecipeWorkspaceMount {
 }
 
 export interface RecipeModules {
-  subagents?: boolean | { defaultModel?: string };
+  subagents?: boolean | { defaultModel?: string; defaultMaxTokens?: number };
   lessons?: boolean;
   retrieval?: boolean | { model?: string; maxInjected?: number };
   /** Loosened from upstream's GateConfig — cook doesn't need its shape. */
   wake?: boolean | Record<string, unknown>;
   workspace?: boolean | { mounts: RecipeWorkspaceMount[]; configMount?: boolean };
+  /** Surface typing-indicator activity to MCPL channels while inferring. */
+  activity?: boolean | { channels?: string[] };
+  /**
+   * Cross-process child fleet.  Relative paths in `children[].recipe` are
+   * resolved at load time against the parent recipe file's directory (or URL
+   * base) — see resolveRecipeRelative().  Runtime paths (workspace mounts,
+   * dataDir) stay CWD-relative.
+   */
   fleet?: boolean | RecipeFleet;
 }
 
@@ -103,6 +122,8 @@ export interface RecipeFleet {
 
 export interface RecipeFleetChild {
   name: string;
+  /** Recipe path or http(s) URL; relative paths resolve against the parent
+   *  recipe's location (file dir or URL base), not CWD. */
   recipe: string;
   dataDir?: string;
   env?: Record<string, string>;
@@ -122,16 +143,37 @@ export interface Recipe {
 }
 
 // ---------------------------------------------------------------------------
-// Loading (raw — no env-substitution, no prompt-fetching)
+// Path resolution helpers
+// ---------------------------------------------------------------------------
+
+/** Base for resolving recipe-relative paths.  `file` sources use the parent
+ *  recipe's directory; `url` sources use the parent URL as base. */
+export type RecipeSourceBase =
+  | { kind: 'file'; dir: string }
+  | { kind: 'url'; base: string };
+
+/** Resolve a child recipe reference against its parent's source base.
+ *  Absolute paths and `http(s)://` URLs pass through unchanged.  Used by
+ *  cook's walker to traverse fleet children portably. */
+export function resolveRecipeRelative(child: string, base: RecipeSourceBase): string {
+  if (child.startsWith('http://') || child.startsWith('https://')) return child;
+  if (isAbsolute(child)) return child;
+  if (base.kind === 'file') return resolve(base.dir, child);
+  return new URL(child, base.base).href;
+}
+
+// ---------------------------------------------------------------------------
+// Loading (raw — no env-substitution, no prompt-fetching, no path resolution)
 // ---------------------------------------------------------------------------
 
 /**
  * Read a recipe from a URL or local file, parse JSON, and validate structure.
  *
  * Unlike upstream's `loadRecipe`, this does NOT substitute `${VAR}` tokens
- * in string values, and does NOT fetch a system-prompt URL.  Cook's pipeline
- * needs raw recipes so the env-collector can find unresolved `${VAR}`s and
- * prompt the operator for them.
+ * in string values, does NOT fetch a system-prompt URL, and does NOT mutate
+ * `children[].recipe` strings to absolute paths.  Cook's pipeline needs raw
+ * recipes so the env-collector can find unresolved `${VAR}`s and prompt the
+ * operator, and the walker can drive its own deterministic traversal.
  */
 export async function loadRecipeRaw(source: string): Promise<Recipe> {
   let raw: unknown;
@@ -244,6 +286,15 @@ export function validateRecipe(raw: unknown): Recipe {
           if (typeof (src.inContainer as Record<string, unknown>).path !== 'string') {
             throw new Error(`mcpServers.${id}.source.inContainer.path must be a string`);
           }
+        }
+      }
+      for (const field of ['enabledTools', 'disabledTools'] as const) {
+        if (server[field] === undefined) continue;
+        if (
+          !Array.isArray(server[field])
+          || !(server[field] as unknown[]).every((p) => typeof p === 'string' && p)
+        ) {
+          throw new Error(`mcpServers.${id}.${field} must be an array of non-empty strings`);
         }
       }
     }
