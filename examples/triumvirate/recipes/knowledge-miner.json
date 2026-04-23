@@ -23,7 +23,11 @@
         "ENABLE_DISCORD": "false",
         "ZULIP_RC_PATH": "./.zuliprc"
       },
-      "channelSubscription": "manual"
+      "channelSubscription": "manual",
+      "source": {
+        "url": "https://github.com/antra-tess/zulip_mcp.git",
+        "install": "npm"
+      }
     },
     "gitlab": {
       "command": "npx",

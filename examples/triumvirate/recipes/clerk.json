@@ -25,6 +25,10 @@
         "ENABLE_DISCORD": "false",
         "ZULIP_RC_PATH": "./.zuliprc",
         "ZULIP_SUBSCRIBE": "knowledge-ai-assistant"
+      },
+      "source": {
+        "url": "https://github.com/antra-tess/zulip_mcp.git",
+        "install": "npm"
       }
     }
   },

@@ -5,17 +5,19 @@
  *   cli → walker → source-detector → generators
  *             └──→ env-collector ──┘
  *
- * Recipe shapes themselves are imported from connectome-host at the
- * walker boundary — we keep our types focused on derived build-time data.
+ * Recipe types are vendored at src/vendor/recipe.ts and re-exported below
+ * for convenient consumption.
  */
+
+import type { Recipe } from './vendor/recipe.js';
+export type { Recipe } from './vendor/recipe.js';
 
 /** Result of walking a recipe tree: parent + every reachable fleet child. */
 export interface WalkResult {
   /** Absolute path (or URL) the recipe was loaded from. */
   path: string;
-  /** The loaded recipe object. Typed as `unknown` here to avoid pulling
-   *  connectome-host's schema into shared types; walker callers narrow. */
-  recipe: unknown;
+  /** The loaded recipe object (raw — no env substitution applied). */
+  recipe: Recipe;
 }
 
 /** How an MCP server's source should be installed inside the image. */
