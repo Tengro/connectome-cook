@@ -99,13 +99,13 @@ connectome-cook/
 ## Why a separate repo
 
 - **connectome-host** is the framework — code, modules, recipe loader. Stays focused on the runtime.
-- **Recipe repos** (e.g. `lynx-conhost-recipes`) declare what to run, not how to deploy it.
+- **Recipe repos** declare what to run, not how to deploy it.
 - **connectome-cook** is the bridge: takes any recipe, emits a deployable artifact bundle. Versioned and released independently.
 
 ## Future home
 
-For now this lives in @Tengro's namespace. Once the CLI is meaningfully battle-tested against the lynx Triumvirate (5 MCP sources including pip-editable + custom + npx-skip patterns), it'll be handed off to anima-research alongside connectome-host.
+For now this lives in @Tengro's namespace. Once the CLI is meaningfully battle-tested against richer recipe trees (multi-source, BuildKit secrets, mixed install patterns), it'll be handed off to anima-research alongside connectome-host.
 
 ## License
 
-TBD — likely Apache 2.0 to match anima-research/connectome-host.
+Apache 2.0. See [LICENSE](./LICENSE).

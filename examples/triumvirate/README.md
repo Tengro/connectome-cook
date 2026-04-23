@@ -138,7 +138,6 @@ For non-Docker-specific issues (a child agent behaving oddly, Zulip channel subs
 ## What this image is *not*
 
 - **Not a multi-host setup.** The four agents share one container, one filesystem, one process tree. If you want to scale out, the FleetModule's design supports it (each child is its own process with its own data dir) but you'd need to wire IPC across hosts — not done here.
-- **Not the org-specific deployment.** 
 - **Not a production-hardened image.** No non-root supervisor process beyond `tini`, no resource limits, no log rotation past what bun/conductor handle internally. Add those for production deploys.
 
 ## Layout reference

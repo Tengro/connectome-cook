@@ -71,10 +71,8 @@ COPY --from=ch-deps /app/node_modules ./node_modules
 COPY package.json bun.lock tsconfig.json ./
 COPY src ./src
 
-# Self-contained generic Triumvirate recipes (Zulip+GitLab; no syncntn;
-# clerk staffs channel knowledge-ai-assistant).  We do NOT copy
-# connectome-host's own recipes/ folder — that contains org-specific
-# recipes that are slated to migrate to lynx-conhost-recipes.
+# Self-contained generic Triumvirate recipes (Zulip+GitLab; clerk staffs
+# channel knowledge-ai-assistant).
 COPY ch-builder-examples/triumvirate/recipes ./recipes
 
 # Pre-create persistent dirs with bun-user ownership so bind mounts on a

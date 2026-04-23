@@ -98,6 +98,21 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
     }
   }
 
+  // Fleet child data dirs → bind volumes so children survive container
+  // restarts.  Mount the longest common prefix of all dataDirs (the example
+  // shape: `./data:/app/data` rather than 3× `./data/<child>:/app/data/<child>`).
+  // When there's no common ancestor, fall back to per-child mounts.
+  for (const path of fleetDataDirParents(walks)) {
+    const v: ComposeVolume = {
+      host: `./${path}`,
+      container: `/app/${path}`,
+      readOnly: false,
+    };
+    if (!byContainer.has(v.container)) {
+      byContainer.set(v.container, v);
+    }
+  }
+
   const volumes = Array.from(byContainer.values());
 
   // Zulip credentials volume.
@@ -110,6 +125,47 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
   }
 
   return volumes;
+}
+
+/** Collect every fleet child's dataDir (explicit or `./data/<child-name>`
+ *  default) across all walks, then return the minimal set of host paths
+ *  to bind-mount so all of them are persistent.  When all dataDirs share
+ *  a common prefix, returns just the prefix (cleaner YAML, matches the
+ *  hand-curated example).  Otherwise returns each unique entry. */
+function fleetDataDirParents(walks: WalkResult[]): string[] {
+  const dataDirs = new Set<string>();
+  for (const walk of walks) {
+    const fleet = walk.recipe.modules?.fleet;
+    if (!fleet || typeof fleet !== 'object' || !fleet.children) continue;
+    for (const child of fleet.children) {
+      const dir = child.dataDir ?? `./data/${child.name}`;
+      const cleaned = stripLeadingDotSlash(dir);
+      if (cleaned) dataDirs.add(cleaned);
+    }
+  }
+  if (dataDirs.size === 0) return [];
+
+  const segs = Array.from(dataDirs).map((p) => p.split('/').filter(Boolean));
+  // Longest common prefix across all segment lists.
+  const prefix: string[] = [];
+  const minLen = Math.min(...segs.map((s) => s.length));
+  outer: for (let i = 0; i < minLen; i++) {
+    const head = segs[0]?.[i];
+    if (head === undefined) break;
+    for (const s of segs) {
+      if (s[i] !== head) break outer;
+    }
+    prefix.push(head);
+  }
+
+  if (prefix.length > 0) {
+    // Don't collapse to the full path of a single entry — the parent dir
+    // is what we want to bind so siblings can be added without recompose.
+    // If prefix === full path of every entry (all identical), use it as-is.
+    return [prefix.join('/')];
+  }
+  // No common prefix — emit per-dir mounts (caller's Map will dedup).
+  return Array.from(dataDirs);
 }
 
 /**

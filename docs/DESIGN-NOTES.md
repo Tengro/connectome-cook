@@ -1,11 +1,11 @@
 # connectome-cook — design notes from the hand-curated Triumvirate Dockerfiles
 
-These notes were extracted while building the hand-curated generic and Lynx Triumvirate Docker images (`connectome-cook-examples/triumvirate/` here, `lynx-conhost-recipes/docker_files/triumvirate/` in the org repo). The hand-curated images are the test target `connectome-cook` should produce equivalent output for; this doc captures the lessons + patterns so the auto-builder doesn't relearn them the hard way.
+These notes were extracted while building hand-curated Triumvirate Docker images (the in-repo `examples/triumvirate/` set, plus a richer multi-source variant kept out of this repo). The hand-curated images are the test target `connectome-cook` should produce equivalent output for; this doc captures the lessons + patterns so the auto-builder doesn't relearn them the hard way.
 
 ## Hard-won lessons
 
 ### 1. Confabulated dependencies are the worst kind of bug
-The Lynx miner recipe referenced `uvx ftp-mcp-server` — a Python MCP server. It looked plausible (it had explicit `enabledTools` lists, was documented in install.md), but the package never existed on PyPI. We caught it only after a smoke test failure traced back to "uv: No solution found in package registry." A `|| true` on the build-time pre-cache had silently masked the failure for hours.
+A miner recipe once referenced `uvx ftp-mcp-server` — a Python MCP server. It looked plausible (it had explicit `enabledTools` lists, was documented in the operator install guide), but the package never existed on PyPI. We caught it only after a smoke test failure traced back to "uv: No solution found in package registry." A `|| true` on the build-time pre-cache had silently masked the failure for hours.
 
 **For connectome-cook:** every generated source needs an *active verification* step at build time — not just "did the install command exit zero," but "does the binary actually exist and respond to a probe." Don't `|| true` verifications.
 
@@ -20,7 +20,7 @@ A `chore: bump @animalabs/agent-framework to ^0.3.0` commit landed on `main` whi
 **For connectome-cook:** pin both `@animalabs/agent-framework` *and* the connectome-host source SHA in the generated image. The operator running `docker compose up` shouldn't get different runtime behavior depending on when they last `git pull`'d.
 
 ### 4. Recipe-relative paths constrain in-container layout
-The Lynx conductor recipe references children as `./knowledge-miner.json`. That resolves correctly only if recipes live where the conductor lives — not in a subdir like `recipes/`. The connectome-host generic recipes use `recipes/knowledge-miner.json` instead, which works for a different layout. Mixing the two breaks one or the other.
+A conductor recipe that references children as `./knowledge-miner.json` resolves correctly only if recipes live where the conductor lives — not in a subdir like `recipes/`. Recipes that use `recipes/knowledge-miner.json` instead need a different layout. Mixing the two breaks one or the other.
 
 **For connectome-cook:** treat the parent recipe's location in the container as the anchor; child recipe references in the parent dictate where the children must live. Don't impose a `recipes/` subdir convention if the parent uses sibling references.
 
@@ -40,7 +40,7 @@ COPY-ing a host-built `.venv/` into the container looks like it'll work and brea
 **For connectome-cook:** in any verification scripts the generator emits, prefer `>` and read the file with `cat`. Or use bash's `pipefail`.
 
 ### 8. Self-signed CAs need explicit handling
-`git.ath` uses an internal self-signed cert that the container's CA bundle doesn't trust. First auto-clone build failed with "server verification failed: certificate signer not trusted." Pragmatic fix: `git -c http.sslVerify=false clone ...`. Strict fix: mount the org's CA bundle into the image.
+An internal git host using a self-signed cert isn't in the container's CA bundle. First auto-clone build failed with "server verification failed: certificate signer not trusted." Pragmatic fix: `git -c http.sslVerify=false clone ...`. Strict fix: mount the org's CA bundle into the image.
 
 **For connectome-cook:** make this explicit per-source in the recipe schema (`source.sslBypass: boolean`), don't assume one or the other.
 
@@ -171,14 +171,13 @@ If the recipe declares `source.inContainer.path`, connectome-cook can derive the
 
 Look at these for the exact patterns to emit:
 
-- `connectome-cook-examples/triumvirate/Dockerfile` — generic shape (Zulip + GitLab, no auth-needed clones)
-- `lynx-conhost-recipes/docker_files/triumvirate/Dockerfile` — full-shape (5 MCP servers, BuildKit secrets, SSL bypass, mixed runtimes)
-- Both `docker-compose.yml` files — bind mounts + TTY config
-- Both `README.md` files — operator-facing documentation that's largely formulaic
-- The Python overlay-generation snippet in this branch's history (used `bun -e "..."` to derive the Docker recipe overlay from the org root recipe)
+- `examples/triumvirate/Dockerfile` — generic shape (Zulip + GitLab, no auth-needed clones)
+- `examples/triumvirate/docker-compose.yml` — bind mounts + TTY config
+- `examples/triumvirate/README.md` — operator-facing documentation that's largely formulaic
+- The full-shape variants (5+ MCP servers, BuildKit secrets, SSL bypass, mixed runtimes) referenced through the lessons above were hand-curated in private repos; structurally they're the same recipe-shape extended along the dimensions cook already supports
 
 ## Connectome-host sibling vs auto-clone
 
-The Lynx Dockerfile (as of this writing) keeps connectome-host as a **sibling COPY** for ergonomic reasons — operator iterates connectome-host locally for the recipes-tested-locally-first workflow, and re-pulling on every full Docker build adds time.
+A sibling-COPY of connectome-host can save time during local iteration: the operator already has a checkout, and re-cloning on every full Docker build adds latency and a network dependency.
 
 For a release-only Docker (no local connectome-host iteration expected), zero-siblings is feasible: clone connectome-host from a configurable URL + ref. Trade-off is rebuild speed vs single-command setup. For connectome-cook default, **lean toward zero-siblings** — the assumption being "Docker is for release, local dev is outside Docker." Allow opt-in to sibling-COPY via a `--sibling connectome-host` flag.

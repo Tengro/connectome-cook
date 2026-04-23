@@ -1,6 +1,6 @@
 {
   "name": "Knowledge Miner (generic Triumvirate example)",
-  "description": "Extract structured knowledge from Zulip and GitLab using forking agents. Generic Zulip+GitLab Triumvirate demo — no org-specific sources. See lynx-conhost-recipes for the company-specific variant that adds Notion via syncntn.",
+  "description": "Extract structured knowledge from Zulip and GitLab using forking agents. Generic Zulip+GitLab Triumvirate demo — extend mcpServers to add more sources (Notion, FTP, etc.).",
   "version": "1.1.0-generic",
 
   "agent": {
