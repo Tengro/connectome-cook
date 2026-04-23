@@ -54,12 +54,10 @@ With `agent-framework@0.3.0`, a single MCP server failure kills the agent. With 
 
 **For connectome-cook:** consider generating a `--validate` mode where the image just spawns each MCP server in isolation and reports which ones fail and why, separately from the all-or-nothing `docker compose up`. Helps operators triage before committing to a full run.
 
-### 11. Fleet-child path resolution diverges between build-time and runtime
-Cook's walker resolves `fleet.children[].recipe` against the **parent recipe's directory** — the only sensible semantic for a build-time tool that's handed a recipe path with no useful CWD. Upstream connectome-host's `FleetModule`, however, resolves the same field against **`process.cwd()`** (documented in `recipe.ts` near the `RecipeFleet` definition). The two semantics agree only when the conductor's CWD happens to equal the parent recipe's directory.
+### 11. Fleet-child path resolution: parent-dir-relative on both sides
+Cook's walker resolves `fleet.children[].recipe` against the **parent recipe's directory** — the only sensible semantic for a build-time tool that's handed a recipe path with no useful CWD. Upstream connectome-host adopted the same semantic in `fix(recipe): resolve fleet children[].recipe against parent recipe dir` (commit `a7a2497`), exposing `resolveRecipeRelative` from `src/recipe.ts` and applying it inside `loadRecipe`. The conhost in-tree recipes were updated to use bare filenames (`knowledge-miner.json`, not `recipes/knowledge-miner.json`) at the same time.
 
-The hand-curated Triumvirate Dockerfile masks this: it invokes `bun src/index.ts recipes/triumvirate.json` from `/app`, with children declared as `recipes/<child>.json` — works at runtime (CWD-relative resolves to `/app/recipes/<child>.json`) but fails for cook (parent-dir-relative would resolve to `/app/recipes/recipes/<child>.json`). After Phase 1 we adjusted the example's children to `./<child>.json` so cook's walker can load them; that breaks the example's existing Dockerfile until the runtime invocation is also updated to `cd recipes && bun /app/src/index.ts triumvirate.json` (or upstream switches semantics).
-
-**For connectome-cook:** open an upstream PR moving connectome-host to parent-dir resolution. Until that lands, the generated Dockerfile's CMD must `cd` into the parent recipe's directory before exec-ing bun, and recipes shipped with cook should use sibling references (`./child.json`) rather than `recipes/child.json`. Document this in the generated README so operators understand why the CMD is shaped that way.
+**For connectome-cook:** ship recipes that use bare filenames or `./<child>.json` for fleet children — both work identically under parent-dir resolution. Generated Dockerfile CMDs can stay `bun src/index.ts <parent-recipe>` from any CWD; child resolution no longer depends on it. The cook example at `examples/triumvirate/recipes/triumvirate.json` uses the `./<child>.json` form for clarity.
 
 ## Reusable patterns
 
