@@ -1,0 +1,33 @@
+{
+  "name": "connectome-cook",
+  "version": "0.0.1",
+  "description": "Recipes in, Docker images out. CLI that takes a connectome-host recipe and cooks it into a deployable Docker artifact bundle.",
+  "type": "module",
+  "bin": {
+    "cook": "./bin/cook"
+  },
+  "scripts": {
+    "dev": "bun bin/cook",
+    "build": "tsc",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "mri": "^1.2.0",
+    "picocolors": "^1.1.1",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9",
+    "typescript": "^5.7.0"
+  }
+}
