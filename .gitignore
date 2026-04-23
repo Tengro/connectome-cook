@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Operator-local state from running any example
+examples/*/.env
+examples/*/.zuliprc
+examples/*/data/
+examples/*/output/
+examples/*/review-output/
+examples/*/knowledge-requests/
+examples/*/input/
+examples/*/lineage-data/
+
+# Build artifacts the CLI may produce
+out/
+.cache/

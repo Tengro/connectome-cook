@@ -1,0 +1,38 @@
+# BuildKit reads this when building with -f ch-builder-examples/triumvirate/Dockerfile
+# (BuildKit-specific: <dockerfile>.dockerignore alongside the Dockerfile).
+# Requires Docker 23+ / Buildx 0.10+ — both default in modern installs.
+
+# Local install + build artifacts (we re-install inside the build stage)
+node_modules
+dist
+tsconfig.tsbuildinfo
+
+# Persistent runtime state — never goes into the image
+data
+output
+review-output
+knowledge-requests
+input
+
+# Local creds and recipes
+.env
+.zuliprc
+my-recipe.json
+mcpl-servers.json
+
+# VCS + editor metadata
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+
+# Operator-local files in any ch-builder example shouldn't bloat the
+# build context.
+ch-builder-examples/*/data
+ch-builder-examples/*/output
+ch-builder-examples/*/review-output
+ch-builder-examples/*/knowledge-requests
+ch-builder-examples/*/input
+ch-builder-examples/*/.env
+ch-builder-examples/*/.zuliprc

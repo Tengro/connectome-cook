@@ -1,0 +1,52 @@
+# Triumvirate (Dockerized) — see README.md for the full operator guide.
+#
+# Quick start:
+#   1. cp .env.example .env  &&  edit it (ANTHROPIC_API_KEY at minimum)
+#   2. Place your Zulip bot's .zuliprc in this directory  &&  chmod 600 .zuliprc
+#   3. docker compose up -d --build
+#   4. docker attach triumvirate            # join the conductor TUI
+#
+# Detach the TUI without stopping anything: press Ctrl+P then Ctrl+Q.
+# Do NOT use /quit + d inside the conductor — when the conductor exits,
+# PID 1 dies and the container shuts down (taking all children with it).
+# Use Docker's detach sequence instead.
+#
+# Stop everything: docker compose down
+
+services:
+  triumvirate:
+    build:
+      context: ../..                              # connectome-host repo root
+      dockerfile: ch-builder-examples/triumvirate/Dockerfile
+    image: ch-triumvirate:latest
+    container_name: triumvirate
+
+    # Conductor TUI is PID 1. OpenTUI needs a real TTY for rendering and
+    # keypress capture; without these two flags `docker attach` shows
+    # nothing useful.
+    stdin_open: true
+    tty: true
+
+    # ANTHROPIC_API_KEY (required) plus any optional GITLAB_* / NOTION_*
+    # vars you've added.  Recipe ${VAR} substitution reads from the
+    # child process's env at startup.
+    env_file:
+      - .env
+
+    volumes:
+      # Zulip credentials — read-only.
+      - ./.zuliprc:/app/.zuliprc:ro
+
+      # Persistent state — bind-mounted so library artifacts are
+      # inspectable from the host with cat / grep / your editor.
+      - ./data:/app/data
+      - ./output:/app/output                      # library-mined
+      - ./review-output:/app/review-output        # library-reviewed
+      - ./knowledge-requests:/app/knowledge-requests
+      - ./input:/app/input                        # read-only external inputs
+
+    # docker stop sends SIGTERM; tini forwards it to the conductor, which
+    # has its own graceful-shutdown logic for the three children
+    # (gracefulShutdownMs + sigtermEscalationMs in the FleetModule
+    # config).  30s gives the slowest child time to flush.
+    stop_grace_period: 30s

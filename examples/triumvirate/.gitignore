@@ -1,0 +1,10 @@
+# Operator-local files — never committed.
+.env
+.zuliprc
+
+# Persistent runtime state from `docker compose up`.
+data/
+output/
+review-output/
+knowledge-requests/
+input/
