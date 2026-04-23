@@ -26,6 +26,7 @@ import {
   promptForVars,
   resolvePresent,
 } from './prompts.js';
+import { listTemplates, scaffoldRecipe, type TemplateName } from './init.js';
 
 const pkg = JSON.parse(
   readFileSync(
@@ -395,9 +396,62 @@ async function handleCheck(argv: string[]): Promise<number> {
   return 0;
 }
 
-async function handleInit(_argv: string[]): Promise<number> {
-  log.error('init: not yet implemented (Phase 4 of BUILD-PLAN.md).');
-  return 64;
+const INIT_USAGE = `${log.bold('cook init')} — scaffold a starter recipe.
+
+${log.bold('Usage:')}
+  cook init <name> [--template <name>] [--out <path>]
+
+${log.bold('Templates:')}
+  minimal                Single agent, no MCP servers (default).
+  zulip-agent            Single agent staffing a Zulip channel.
+  triumvirate            Three-agent fleet + conductor.
+
+${log.bold('Flags:')}
+  --template <name>      Pick a starter template (default: minimal).
+  --out <path>           Output recipe path (default: ./<name>.json).
+  --help, -h             Show this message.
+`;
+
+async function handleInit(argv: string[]): Promise<number> {
+  const flags = mri(argv, {
+    boolean: ['help'],
+    string: ['template', 'out'],
+    alias: { h: 'help' },
+  });
+
+  if (flags.help) {
+    process.stdout.write(INIT_USAGE);
+    return 0;
+  }
+
+  const [name] = flags._ as string[];
+  if (!name) {
+    log.error('init: missing recipe name');
+    process.stderr.write(`\n${INIT_USAGE}`);
+    return 1;
+  }
+
+  const template = (flags.template ?? 'minimal') as TemplateName;
+  const knownTemplates = listTemplates().map((t) => t.name);
+  if (!knownTemplates.includes(template)) {
+    log.error(`init: unknown template "${template}". Known: ${knownTemplates.join(', ')}`);
+    return 1;
+  }
+
+  const outPath = resolve(flags.out ?? `./${slugify(name)}.json`);
+  try {
+    const result = scaffoldRecipe(name, template, outPath);
+    log.success(`scaffolded ${result.written.length} file${result.written.length === 1 ? '' : 's'}:`);
+    for (const p of result.written) {
+      process.stdout.write(`    ${log.dim(p)}\n`);
+    }
+    log.info('');
+    log.info(`Next: ${log.bold(`cook check ${outPath}`)} to verify, then ${log.bold(`cook build ${outPath}`)}.`);
+    return 0;
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
 }
 
 const SUBCOMMANDS: Record<string, SubcommandHandler> = {
