@@ -1,4 +1,5 @@
 import mri from 'mri';
+import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -19,6 +20,12 @@ import { generateCompose } from './generators/compose.js';
 import { generateOverlays } from './generators/overlay.js';
 import { generateEnv } from './generators/env.js';
 import { generateReadme } from './generators/readme.js';
+import {
+  deriveRequiredVars,
+  loadEnvFile,
+  promptForVars,
+  resolvePresent,
+} from './prompts.js';
 
 const pkg = JSON.parse(
   readFileSync(
@@ -54,9 +61,9 @@ ${log.bold('Flags:')}
   --out <dir>            Output directory (default: ./<recipe-name>-cook)
   --strict               Fail if any MCP server lacks a \`source\` block
   --image-name <name>    Override the generated image name
-  --no-prompts           Non-interactive (Phase 3; currently always non-interactive)
-  --env-file <path>      Read variable values from this file (Phase 3)
-  --pin-refs             Resolve branch refs to current SHAs (Phase 3)
+  --no-prompts           Non-interactive; warn-and-continue on missing values
+  --env-file <path>      Read variable values from this file before prompting
+  --pin-refs             Resolve branch refs to current SHAs (Phase 4)
   --help, -h             Show this message
 `;
 
@@ -104,30 +111,42 @@ function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Rec
   return merged;
 }
 
-async function handleBuild(argv: string[]): Promise<number> {
+/** Render a `.env` file body from collected key/value pairs.  Sorted by
+ *  key for determinism; each line `KEY=value` with a trailing newline. */
+function renderEnvFile(values: Record<string, string>): string {
+  const keys = Object.keys(values).sort();
+  return keys.map((k) => `${k}=${values[k]}`).join('\n') + (keys.length ? '\n' : '');
+}
+
+/** Result of the build pipeline (used by both build and run handlers). */
+interface BuildResult {
+  exitCode: number;
+  outDir: string;
+}
+
+async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   const flags = mri(argv, {
-    boolean: ['help', 'no-prompts', 'strict', 'pin-refs'],
+    // mri auto-handles `--no-<flag>` as `flag: false`; we read it as
+    // `flags.prompts === false` below.
+    boolean: ['help', 'strict', 'pin-refs'],
     string: ['out', 'env-file', 'image-name'],
     alias: { h: 'help' },
   });
 
   if (flags.help) {
     process.stdout.write(BUILD_USAGE);
-    return 0;
+    return { exitCode: 0, outDir: '' };
   }
 
   const [recipePath] = flags._ as string[];
   if (!recipePath) {
     log.error('build: missing recipe path');
     process.stderr.write(`\n${BUILD_USAGE}`);
-    return 1;
+    return { exitCode: 1, outDir: '' };
   }
 
-  if (flags['env-file']) {
-    log.warn('--env-file: not yet implemented (Phase 3); ignoring');
-  }
   if (flags['pin-refs']) {
-    log.warn('--pin-refs: not yet implemented (Phase 3); branch refs baked literally');
+    log.warn('--pin-refs: not yet implemented; branch refs baked literally');
   }
 
   let walks: WalkResult[];
@@ -137,13 +156,13 @@ async function handleBuild(argv: string[]): Promise<number> {
     log.success(`loaded ${walks.length} recipe${walks.length === 1 ? '' : 's'}`);
   } catch (err) {
     log.error(`failed to load recipe: ${err instanceof Error ? err.message : String(err)}`);
-    return 2;
+    return { exitCode: 2, outDir: '' };
   }
 
   const parentWalk = walks[0];
   if (!parentWalk) {
     log.error('walker returned no recipes — internal error');
-    return 2;
+    return { exitCode: 2, outDir: '' };
   }
 
   const outDir = resolve(flags.out ?? defaultOutDir(parentWalk.recipe));
@@ -160,12 +179,41 @@ async function handleBuild(argv: string[]): Promise<number> {
     );
   } catch (err) {
     log.error(err instanceof Error ? err.message : String(err));
-    return 2;
+    return { exitCode: 2, outDir };
+  }
+
+  // Resolve required env values: process.env → --env-file → interactive prompt.
+  const required = deriveRequiredVars(envVars, sources);
+  let envFileValues: Record<string, string> = {};
+  if (flags['env-file']) {
+    try {
+      envFileValues = loadEnvFile(resolve(flags['env-file']));
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+      return { exitCode: 1, outDir };
+    }
+  }
+  const { found, missing } = resolvePresent(required, envFileValues);
+  let collectedValues: Record<string, string> = { ...found };
+  if (missing.length > 0) {
+    if ((flags.prompts === false)) {
+      log.warn(
+        `--no-prompts: ${missing.length} required value${missing.length === 1 ? '' : 's'} ` +
+        `still missing — operator must edit .env before \`docker compose up\``,
+      );
+    } else {
+      const result = await promptForVars(missing);
+      if (result.cancelled) {
+        log.warn('cancelled by user');
+        return { exitCode: 1, outDir };
+      }
+      collectedValues = { ...collectedValues, ...result.values };
+    }
   }
 
   const buildOptions: BuildOptions = {
     outDir,
-    noPrompts: !!flags['no-prompts'],
+    noPrompts: flags.prompts === false,
     envFile: flags['env-file'],
     strict: !!flags.strict,
     imageName: flags['image-name'],
@@ -187,13 +235,17 @@ async function handleBuild(argv: string[]): Promise<number> {
     overlays = generateOverlays(input);
   } catch (err) {
     log.error(`generator failed: ${err instanceof Error ? err.message : String(err)}`);
-    return 2;
+    return { exitCode: 2, outDir };
   }
 
   const recipesOut = walks.map((walk) => ({
     filename: recipeFilename(walk.path),
     content: JSON.stringify(applyOverlay(walk.recipe, overlays.get(walk.path)), null, 2) + '\n',
   }));
+
+  // Only write .env if we have values worth writing — otherwise the
+  // operator gets only .env.example to copy/edit themselves.
+  const writeEnvFile = Object.keys(collectedValues).length > 0;
 
   try {
     mkdirSync(outDir, { recursive: true });
@@ -202,27 +254,78 @@ async function handleBuild(argv: string[]): Promise<number> {
     writeFileSync(join(outDir, 'docker-compose.yml'), compose);
     writeFileSync(join(outDir, '.env.example'), envExample);
     writeFileSync(join(outDir, 'README.md'), readme);
+    if (writeEnvFile) {
+      writeFileSync(join(outDir, '.env'), renderEnvFile(collectedValues));
+    }
     for (const { filename, content } of recipesOut) {
       writeFileSync(join(outDir, 'recipes', filename), content);
     }
   } catch (err) {
     log.error(`write failed: ${err instanceof Error ? err.message : String(err)}`);
-    return 3;
+    return { exitCode: 3, outDir };
   }
 
   const overlayCount = Array.from(overlays.values()).length;
-  log.success(`wrote ${4 + recipesOut.length} files to ${outDir}`);
+  const fileCount = 4 + recipesOut.length + (writeEnvFile ? 1 : 0);
+  log.success(`wrote ${fileCount} files to ${outDir}`);
   if (overlayCount > 0) {
     log.info(log.dim(`    (${overlayCount} recipe${overlayCount === 1 ? '' : 's'} have overlays applied)`));
   }
-  log.info('');
-  log.info(`Next: ${log.bold(`cd ${outDir}`)} && ${log.bold('cp .env.example .env')} && ${log.bold('docker compose up -d --build')}`);
-  return 0;
+  return { exitCode: 0, outDir };
 }
 
-async function handleRun(_argv: string[]): Promise<number> {
-  log.error('run: not yet implemented (Phase 3 of BUILD-PLAN.md).');
-  return 64;
+async function handleBuild(argv: string[]): Promise<number> {
+  const result = await runBuildPipeline(argv);
+  if (result.exitCode === 0 && result.outDir) {
+    log.info('');
+    const next = `cd ${result.outDir} && docker compose up -d --build`;
+    log.info(`Next: ${log.bold(next)}`);
+  }
+  return result.exitCode;
+}
+
+const RUN_USAGE = `${log.bold('cook run')} — build then \`docker compose up\` from the cook output dir.
+
+${log.bold('Usage:')}
+  cook run <recipe-path-or-url> [build-flags] [-- compose-args]
+
+Build flags are the same as ${log.bold('cook build')}.  Anything after \`--\` is
+passed through to \`docker compose up\` (e.g. \`-- -d\` for detached).
+
+By default cook runs ${log.dim('docker compose up --build')} attached so you can
+see the TUI directly.  Use ${log.dim('-- -d')} for detached.
+`;
+
+async function handleRun(argv: string[]): Promise<number> {
+  // Split argv at the `--` separator: anything before goes to build,
+  // anything after goes to docker compose.
+  const sep = argv.indexOf('--');
+  const buildArgs = sep === -1 ? argv : argv.slice(0, sep);
+  const composeArgs = sep === -1 ? [] : argv.slice(sep + 1);
+
+  if (buildArgs.includes('--help') || buildArgs.includes('-h')) {
+    process.stdout.write(RUN_USAGE);
+    return 0;
+  }
+
+  const buildResult = await runBuildPipeline(buildArgs);
+  if (buildResult.exitCode !== 0) {
+    return buildResult.exitCode;
+  }
+
+  log.step(`docker compose up in ${log.dim(buildResult.outDir)}`);
+  const composeFinalArgs = composeArgs.length > 0 ? ['up', ...composeArgs] : ['up', '--build'];
+  return new Promise<number>((resolveExit) => {
+    const child = spawn('docker', ['compose', ...composeFinalArgs], {
+      cwd: buildResult.outDir,
+      stdio: 'inherit',
+    });
+    child.on('close', (code) => resolveExit(code ?? 3));
+    child.on('error', (err) => {
+      log.error(`failed to spawn docker: ${err.message}`);
+      resolveExit(3);
+    });
+  });
 }
 
 async function handleCheck(argv: string[]): Promise<number> {
