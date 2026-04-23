@@ -91,3 +91,17 @@ export interface BuildOptions {
 
 /** Subcommand handler signature — all subcommands conform to this. */
 export type SubcommandHandler = (argv: string[]) => Promise<number>;
+
+/** Bundle of everything a generator needs to emit one artifact.  All Phase 2
+ *  generators (dockerfile, compose, overlay, env, readme) take this shape;
+ *  individual generators are free to ignore fields they don't need. */
+export interface GeneratorInput {
+  /** Walker output: parent first, then descendants in declaration order. */
+  walks: WalkResult[];
+  /** Deduplicated MCP sources discovered across the walked recipes. */
+  sources: McpSource[];
+  /** Environment variables referenced anywhere in the walked recipes. */
+  envVars: EnvVar[];
+  /** Build-time options (output dir, image name, strict mode, etc.). */
+  options: BuildOptions;
+}

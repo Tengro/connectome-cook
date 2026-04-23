@@ -1,12 +1,24 @@
 import mri from 'mri';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { log } from './log.js';
-import type { SubcommandHandler } from './types.js';
+import { slugify } from './slug.js';
+import type {
+  BuildOptions,
+  GeneratorInput,
+  SubcommandHandler,
+  WalkResult,
+} from './types.js';
+import type { Recipe, RecipeMcpServer } from './vendor/recipe.js';
 import { walkRecipe } from './walker.js';
 import { detectSources } from './source-detector.js';
 import { collectEnvVars } from './env-collector.js';
+import { generateDockerfile } from './generators/dockerfile.js';
+import { generateCompose } from './generators/compose.js';
+import { generateOverlays } from './generators/overlay.js';
+import { generateEnv } from './generators/env.js';
+import { generateReadme } from './generators/readme.js';
 
 const pkg = JSON.parse(
   readFileSync(
@@ -33,6 +45,21 @@ ${log.bold('Global flags:')}
 Run ${log.dim('cook <command> --help')} for command-specific flags.
 `;
 
+const BUILD_USAGE = `${log.bold('cook build')} — generate a Docker artifact bundle for a recipe.
+
+${log.bold('Usage:')}
+  cook build <recipe-path-or-url> [flags]
+
+${log.bold('Flags:')}
+  --out <dir>            Output directory (default: ./<recipe-name>-cook)
+  --strict               Fail if any MCP server lacks a \`source\` block
+  --image-name <name>    Override the generated image name
+  --no-prompts           Non-interactive (Phase 3; currently always non-interactive)
+  --env-file <path>      Read variable values from this file (Phase 3)
+  --pin-refs             Resolve branch refs to current SHAs (Phase 3)
+  --help, -h             Show this message
+`;
+
 const CHECK_USAGE = `${log.bold('cook check')} — validate a recipe + summarize what cook would build.
 
 ${log.bold('Usage:')}
@@ -44,9 +71,153 @@ ${log.bold('Flags:')}
   --help, -h             Show this message
 `;
 
-async function handleBuild(_argv: string[]): Promise<number> {
-  log.error('build: not yet implemented (Phase 2 of BUILD-PLAN.md).');
-  return 64;
+/** Pick the output filename for one walked recipe.  File-paths use basename
+ *  as-is so the in-container layout matches what operators wrote.  URLs get
+ *  slugified plus `.json`. */
+function recipeFilename(walkPath: string): string {
+  if (walkPath.startsWith('http://') || walkPath.startsWith('https://')) {
+    return `${slugify(walkPath)}.json`;
+  }
+  return basename(walkPath);
+}
+
+/** Default output dir name when --out isn't supplied. */
+function defaultOutDir(parentRecipe: Recipe): string {
+  return `./${slugify(parentRecipe.name)}-cook`;
+}
+
+/** Apply a Partial<Recipe> overlay to a Recipe with shallow per-mcpServer
+ *  merge.  Matches the contract `generateOverlays` documents — only the
+ *  fields a generator wants to override are present in the overlay. */
+function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Recipe {
+  if (!overlay) return recipe;
+  const merged: Recipe = { ...recipe };
+  if (overlay.mcpServers) {
+    merged.mcpServers = { ...(recipe.mcpServers ?? {}) };
+    for (const [name, overlayServer] of Object.entries(overlay.mcpServers)) {
+      const original = recipe.mcpServers?.[name];
+      merged.mcpServers[name] = original
+        ? { ...original, ...(overlayServer as Partial<RecipeMcpServer>) }
+        : (overlayServer as RecipeMcpServer);
+    }
+  }
+  return merged;
+}
+
+async function handleBuild(argv: string[]): Promise<number> {
+  const flags = mri(argv, {
+    boolean: ['help', 'no-prompts', 'strict', 'pin-refs'],
+    string: ['out', 'env-file', 'image-name'],
+    alias: { h: 'help' },
+  });
+
+  if (flags.help) {
+    process.stdout.write(BUILD_USAGE);
+    return 0;
+  }
+
+  const [recipePath] = flags._ as string[];
+  if (!recipePath) {
+    log.error('build: missing recipe path');
+    process.stderr.write(`\n${BUILD_USAGE}`);
+    return 1;
+  }
+
+  if (flags['env-file']) {
+    log.warn('--env-file: not yet implemented (Phase 3); ignoring');
+  }
+  if (flags['pin-refs']) {
+    log.warn('--pin-refs: not yet implemented (Phase 3); branch refs baked literally');
+  }
+
+  let walks: WalkResult[];
+  try {
+    log.step(`walking recipe ${log.dim(recipePath)}`);
+    walks = await walkRecipe(recipePath);
+    log.success(`loaded ${walks.length} recipe${walks.length === 1 ? '' : 's'}`);
+  } catch (err) {
+    log.error(`failed to load recipe: ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
+  }
+
+  const parentWalk = walks[0];
+  if (!parentWalk) {
+    log.error('walker returned no recipes — internal error');
+    return 2;
+  }
+
+  const outDir = resolve(flags.out ?? defaultOutDir(parentWalk.recipe));
+
+  let sources;
+  let envVars;
+  try {
+    log.step(`detecting MCP sources (${flags.strict ? 'strict' : 'non-strict'})`);
+    sources = detectSources(walks, { strict: !!flags.strict });
+    envVars = collectEnvVars(walks);
+    log.success(
+      `detected ${sources.length} MCP source${sources.length === 1 ? '' : 's'}, ` +
+      `${envVars.length} env var${envVars.length === 1 ? '' : 's'}`,
+    );
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+
+  const buildOptions: BuildOptions = {
+    outDir,
+    noPrompts: !!flags['no-prompts'],
+    envFile: flags['env-file'],
+    strict: !!flags.strict,
+    imageName: flags['image-name'],
+    pinRefs: !!flags['pin-refs'],
+  };
+  const input: GeneratorInput = { walks, sources, envVars, options: buildOptions };
+
+  log.step(`generating artifacts → ${log.dim(outDir)}`);
+  let dockerfile: string;
+  let compose: string;
+  let envExample: string;
+  let readme: string;
+  let overlays: Map<string, Partial<Recipe>>;
+  try {
+    dockerfile = generateDockerfile(input);
+    compose = generateCompose(input);
+    envExample = generateEnv(input);
+    readme = generateReadme(input);
+    overlays = generateOverlays(input);
+  } catch (err) {
+    log.error(`generator failed: ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
+  }
+
+  const recipesOut = walks.map((walk) => ({
+    filename: recipeFilename(walk.path),
+    content: JSON.stringify(applyOverlay(walk.recipe, overlays.get(walk.path)), null, 2) + '\n',
+  }));
+
+  try {
+    mkdirSync(outDir, { recursive: true });
+    mkdirSync(join(outDir, 'recipes'), { recursive: true });
+    writeFileSync(join(outDir, 'Dockerfile'), dockerfile);
+    writeFileSync(join(outDir, 'docker-compose.yml'), compose);
+    writeFileSync(join(outDir, '.env.example'), envExample);
+    writeFileSync(join(outDir, 'README.md'), readme);
+    for (const { filename, content } of recipesOut) {
+      writeFileSync(join(outDir, 'recipes', filename), content);
+    }
+  } catch (err) {
+    log.error(`write failed: ${err instanceof Error ? err.message : String(err)}`);
+    return 3;
+  }
+
+  const overlayCount = Array.from(overlays.values()).length;
+  log.success(`wrote ${4 + recipesOut.length} files to ${outDir}`);
+  if (overlayCount > 0) {
+    log.info(log.dim(`    (${overlayCount} recipe${overlayCount === 1 ? '' : 's'} have overlays applied)`));
+  }
+  log.info('');
+  log.info(`Next: ${log.bold(`cd ${outDir}`)} && ${log.bold('cp .env.example .env')} && ${log.bold('docker compose up -d --build')}`);
+  return 0;
 }
 
 async function handleRun(_argv: string[]): Promise<number> {

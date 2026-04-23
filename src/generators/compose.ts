@@ -1,0 +1,260 @@
+/**
+ * Compose generator — Phase 2 of BUILD-PLAN.md.
+ *
+ * Templates a `docker-compose.yml` (Compose v2 format) for a single service
+ * that runs the parent recipe.  The recipe-host process spawned inside the
+ * container is responsible for starting fleet children — one Compose service
+ * is enough no matter how many child agents the recipe orchestrates.
+ *
+ * Why hand-rolled YAML (not js-yaml)? Compose YAML is a small, well-defined
+ * shape; pulling a YAML library for one generator is not worth the install
+ * cost.  We carefully indent + quote where the spec demands it and produce
+ * output that round-trips through `js-yaml`/`yaml`/`Bun.YAML.parse`.
+ *
+ * Reference output: examples/triumvirate/docker-compose.yml.  Functional
+ * equivalence is the goal (header comments + bind-mount commentary may
+ * differ; the structural shape — services map, build context, volumes,
+ * env_file, stdin_open + tty, stop_grace_period — must match).
+ */
+
+import type { GeneratorInput, McpSource, WalkResult } from '../types.js';
+import type { RecipeWorkspaceMount, RecipeMcpServer } from '../vendor/recipe.js';
+import { slugify } from '../slug.js';
+export { slugify };
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a `docker-compose.yml` string for the given recipe tree.
+ *
+ * Throws if `input.walks` is empty (caller error — there must be at least a
+ * parent recipe).
+ */
+export function generateCompose(input: GeneratorInput): string {
+  if (input.walks.length === 0) {
+    throw new Error('generateCompose: walks must contain at least the parent recipe');
+  }
+
+  const parent = input.walks[0]!;
+  const serviceName = deriveServiceName(parent.recipe.name);
+  const imageName = input.options.imageName ?? `${serviceName}:latest`;
+
+  const volumes = collectVolumes(input.walks);
+  const secrets = input.sources.filter((s) => s.authSecret);
+
+  return renderCompose({
+    serviceName,
+    imageName,
+    volumes,
+    secrets,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Slug derivation
+// ---------------------------------------------------------------------------
+
+function deriveServiceName(recipeName: string): string {
+  return slugify(recipeName);
+}
+
+// ---------------------------------------------------------------------------
+// Volume derivation
+// ---------------------------------------------------------------------------
+
+/** Internal compose volume entry. Rendered as `./<host>:<container>[:ro]`. */
+interface ComposeVolume {
+  host: string;
+  container: string;
+  readOnly: boolean;
+}
+
+/**
+ * Aggregate workspace mounts across every walked recipe.  Dedup key is the
+ * normalized container path so two recipes mounting different host names at
+ * `./output` collapse to a single entry (first-write-wins on host name +
+ * mode — mirrors source-detector's first-wins policy).
+ *
+ * Always-included extras:
+ *   - `./.zuliprc:/app/.zuliprc:ro` — IF any recipe has an mcpServer that
+ *     looks Zulip-related (env.ZULIP_RC_PATH, args mentioning .zuliprc, etc.).
+ *     Hacky heuristic; cheap to evaluate.
+ */
+function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
+  const byContainer = new Map<string, ComposeVolume>();
+
+  // Workspace mounts → bind volumes.
+  for (const walk of walks) {
+    const workspace = walk.recipe.modules?.workspace;
+    if (!workspace || typeof workspace !== 'object' || !workspace.mounts) continue;
+    for (const mount of workspace.mounts) {
+      const v = mountToVolume(mount);
+      // First-write-wins on container path.
+      if (!byContainer.has(v.container)) {
+        byContainer.set(v.container, v);
+      }
+    }
+  }
+
+  const volumes = Array.from(byContainer.values());
+
+  // Zulip credentials volume.
+  if (anyRecipeUsesZulip(walks)) {
+    volumes.push({
+      host: './.zuliprc',
+      container: '/app/.zuliprc',
+      readOnly: true,
+    });
+  }
+
+  return volumes;
+}
+
+/**
+ * Convert a recipe workspace mount to a compose bind volume.
+ *
+ * Host side: take `mount.path`, strip leading `./`, leave the rest intact —
+ * the example uses `./data`, `./output`, etc. directly so we mirror that
+ * shape (avoids a slug round-trip that would lose information).
+ * Container side: `/app/<lastSegment>` of the host path.
+ */
+function mountToVolume(mount: RecipeWorkspaceMount): ComposeVolume {
+  const stripped = stripLeadingDotSlash(mount.path);
+  const lastSegment = stripped.split('/').filter(Boolean).pop() ?? slugify(mount.name);
+  return {
+    host: `./${stripped}`,
+    container: `/app/${lastSegment}`,
+    readOnly: mount.mode === 'read-only',
+  };
+}
+
+function stripLeadingDotSlash(p: string): string {
+  return p.replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+/**
+ * Heuristic: any mcpServer references `.zuliprc` (in args/command/env values)
+ * OR has an env entry named `ZULIP_RC_PATH`.  Catches the example shape
+ * (`env.ZULIP_RC_PATH = "./.zuliprc"`) without needing to know the exact
+ * server name.
+ */
+function anyRecipeUsesZulip(walks: WalkResult[]): boolean {
+  for (const walk of walks) {
+    const servers = walk.recipe.mcpServers;
+    if (!servers) continue;
+    for (const server of Object.values(servers)) {
+      if (mcpServerReferencesZulip(server)) return true;
+    }
+  }
+  return false;
+}
+
+function mcpServerReferencesZulip(server: RecipeMcpServer): boolean {
+  if (server.env) {
+    if ('ZULIP_RC_PATH' in server.env) return true;
+    for (const v of Object.values(server.env)) {
+      if (typeof v === 'string' && v.includes('.zuliprc')) return true;
+    }
+  }
+  if (server.command && server.command.includes('.zuliprc')) return true;
+  if (server.args) {
+    for (const arg of server.args) {
+      if (arg.includes('.zuliprc')) return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// YAML rendering
+// ---------------------------------------------------------------------------
+
+interface RenderInput {
+  serviceName: string;
+  imageName: string;
+  volumes: ComposeVolume[];
+  secrets: McpSource[];
+}
+
+const HEADER = [
+  '# Generated by connectome-cook.',
+  '#',
+  '# Quick start:',
+  '#   1. cp .env.example .env  &&  edit it (set required keys at minimum)',
+  '#   2. docker compose up -d --build',
+  '#   3. docker attach <service>            # join the TUI',
+  '#',
+  '# Detach the TUI without stopping anything: press Ctrl+P then Ctrl+Q.',
+  '# Do NOT use /quit + d inside the TUI — when the parent agent exits,',
+  '# PID 1 dies and the container shuts down (taking all children with it).',
+  '# Use Docker\'s detach sequence instead.',
+  '#',
+  '# Stop everything: docker compose down',
+  '',
+].join('\n');
+
+function renderCompose(input: RenderInput): string {
+  const { serviceName, imageName, volumes, secrets } = input;
+
+  const lines: string[] = [];
+  lines.push(HEADER);
+  lines.push('services:');
+  lines.push(`  ${serviceName}:`);
+  lines.push(`    image: ${imageName}`);
+  lines.push(`    container_name: ${serviceName}`);
+  lines.push('');
+  lines.push('    build:');
+  lines.push('      context: .');
+  lines.push('      dockerfile: Dockerfile');
+  lines.push('');
+  lines.push('    # TUI needs a real TTY for rendering and keypress capture; without');
+  lines.push('    # these two flags `docker attach` shows nothing useful.');
+  lines.push('    stdin_open: true');
+  lines.push('    tty: true');
+  lines.push('');
+  lines.push('    # Recipe ${VAR} substitution reads from the child process\'s env at');
+  lines.push('    # startup. See .env.example for the full list of supported keys.');
+  lines.push('    env_file:');
+  lines.push('      - .env');
+
+  if (volumes.length > 0) {
+    lines.push('');
+    lines.push('    volumes:');
+    for (const v of volumes) {
+      const suffix = v.readOnly ? ':ro' : '';
+      lines.push(`      - ${v.host}:${v.container}${suffix}`);
+    }
+  }
+
+  if (secrets.length > 0) {
+    lines.push('');
+    lines.push('    secrets:');
+    for (const s of secrets) {
+      lines.push(`      - ${s.authSecret}`);
+    }
+  }
+
+  lines.push('');
+  lines.push('    # docker stop sends SIGTERM; tini forwards it to the parent process,');
+  lines.push('    # which has its own graceful-shutdown logic for any fleet children.');
+  lines.push('    # 30s gives the slowest child time to flush state.');
+  lines.push('    stop_grace_period: 30s');
+
+  if (secrets.length > 0) {
+    lines.push('');
+    lines.push('# Secrets are populated from files of the same name in the cook output');
+    lines.push('# directory. Put each token in a file (chmod 600) before `docker compose');
+    lines.push('# up`. See .env.example / README.md for the list and how to source them.');
+    lines.push('secrets:');
+    for (const s of secrets) {
+      lines.push(`  ${s.authSecret}:`);
+      lines.push(`    file: ./${s.authSecret}`);
+    }
+  }
+
+  // Trailing newline so editors don't complain.
+  lines.push('');
+  return lines.join('\n');
+}
