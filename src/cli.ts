@@ -123,11 +123,34 @@ function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Rec
   return merged;
 }
 
+/** Quote a value for safe inclusion in a `.env` file consumed by
+ *  docker-compose.  Compose interpolates `${VAR}` patterns AND certain
+ *  backslash sequences in unquoted values, so any value containing `$`
+ *  must be quoted to prevent compose from trying to expand substrings
+ *  like `${M5qt58t}` from inside a token.  We use single quotes when
+ *  possible (literal — no escapes), and fall back to double quotes with
+ *  `\$ \" \\` escapes when the value itself contains a single quote. */
+function escapeEnvValue(value: string): string {
+  // No special chars at all: write bare for readability.
+  if (!/[$'"#`\\\s]/.test(value)) return value;
+  // Single-quoted: literal everything except `'` itself.
+  if (!value.includes("'")) return `'${value}'`;
+  // Has both `'` and (likely) `$` — switch to double-quoted with escapes.
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$');
+  return `"${escaped}"`;
+}
+
 /** Render a `.env` file body from collected key/value pairs.  Sorted by
- *  key for determinism; each line `KEY=value` with a trailing newline. */
+ *  key for determinism; each line `KEY=value` with a trailing newline.
+ *  Values are quoted/escaped per `escapeEnvValue` so compose's
+ *  interpolation doesn't misread `${...}` substrings inside tokens. */
 function renderEnvFile(values: Record<string, string>): string {
   const keys = Object.keys(values).sort();
-  return keys.map((k) => `${k}=${values[k]}`).join('\n') + (keys.length ? '\n' : '');
+  return keys.map((k) => `${k}=${escapeEnvValue(values[k]!)}`).join('\n')
+    + (keys.length ? '\n' : '');
 }
 
 /** Result of the build pipeline (used by both build and run handlers). */

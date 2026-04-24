@@ -43,14 +43,18 @@ export function repoBasename(url: string): string {
 }
 
 /** Assemble `git clone` honoring sslBypass and authSecret.
- *  When `authSecret` is set, the URL embeds an `oauth2:${TOKEN}` userinfo
- *  segment.  The caller is responsible for adding the matching
- *  `--mount=type=secret` flag to the RUN line. */
+ *  When `authSecret` is set, the URL embeds an `oauth2:$(cat /run/secrets/NAME)`
+ *  userinfo segment — the secret is read INLINE from the BuildKit-mounted
+ *  file, never lands in the process environment, and the caller is
+ *  responsible for adding the matching `--mount=type=secret` flag to the
+ *  RUN line.  We deliberately use `$(cat ...)` rather than the `env=`
+ *  option (which needs docker/dockerfile:1.10+) so this works with any
+ *  BuildKit that supports the basic secret mount. */
 export function gitCloneCommand(source: McpSource): string {
   const sslArg = source.sslBypass ? '-c http.sslVerify=false ' : '';
   if (source.authSecret) {
     const stripped = source.url.replace(/^https?:\/\//, '');
-    return `git ${sslArg}clone "https://oauth2:\${${source.authSecret}}@${stripped}"`;
+    return `git ${sslArg}clone "https://oauth2:$(cat /run/secrets/${source.authSecret})@${stripped}"`;
   }
   return `git ${sslArg}clone ${source.url}`;
 }
@@ -65,10 +69,13 @@ export function gitCheckoutCommand(source: McpSource): string {
   return ` && git checkout ${source.ref}`;
 }
 
-/** RUN-line prefix for a step that needs a BuildKit secret mounted as env.
- *  Returns `--mount=type=secret,id=NAME,env=NAME ` when authSecret is set,
- *  empty otherwise.  Splice into a `RUN ${this} <command>` template. */
+/** RUN-line prefix for a step that needs a BuildKit secret mounted as a
+ *  file at `/run/secrets/NAME`.  The clone command reads the secret with
+ *  `$(cat /run/secrets/NAME)` — see gitCloneCommand.  We avoid the
+ *  newer `env=NAME` option because that requires
+ *  docker/dockerfile:1.10+; the file form works on every supported
+ *  BuildKit. */
 export function secretMountFlag(source: McpSource): string {
   if (!source.authSecret) return '';
-  return `--mount=type=secret,id=${source.authSecret},env=${source.authSecret} `;
+  return `--mount=type=secret,id=${source.authSecret} `;
 }
