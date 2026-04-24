@@ -42,7 +42,16 @@ export function generateCompose(input: GeneratorInput): string {
   const imageName = input.options.imageName ?? `${serviceName}:latest`;
 
   const volumes = collectVolumes(input.walks);
-  const secrets = input.sources.filter((s) => s.authSecret);
+  // Dedupe authSecrets by name — two sources can declare the same
+  // build-time secret (e.g. both notion-mcp and data-lineage on git.ath
+  // using GITLAB_TOKEN), but compose only wants one secret entry per name.
+  const secrets: McpSource[] = [];
+  const seenSecretNames = new Set<string>();
+  for (const s of input.sources) {
+    if (!s.authSecret || seenSecretNames.has(s.authSecret)) continue;
+    seenSecretNames.add(s.authSecret);
+    secrets.push(s);
+  }
 
   return renderCompose({
     serviceName,
