@@ -281,6 +281,17 @@ function renderCompose(input: RenderInput): string {
   lines.push('    build:');
   lines.push('      context: .');
   lines.push('      dockerfile: Dockerfile');
+  if (secrets.length > 0) {
+    // Build-time secrets: `docker compose build` only passes secrets to
+    // the build when they're declared under `build.secrets`.  The
+    // service-level `secrets:` further down handles runtime; build-time
+    // is a separate plumbing.  Both reference the same top-level
+    // `secrets:` block at the bottom of the file.
+    lines.push('      secrets:');
+    for (const s of secrets) {
+      lines.push(`        - ${s.authSecret}`);
+    }
+  }
   lines.push('');
   lines.push('    # TUI needs a real TTY for rendering and keypress capture; without');
   lines.push('    # these two flags `docker attach` shows nothing useful.');
@@ -301,13 +312,9 @@ function renderCompose(input: RenderInput): string {
     }
   }
 
-  if (secrets.length > 0) {
-    lines.push('');
-    lines.push('    secrets:');
-    for (const s of secrets) {
-      lines.push(`      - ${s.authSecret}`);
-    }
-  }
+  // (Service-level `secrets:` is for RUNTIME secret access — agents
+  //  reading /run/secrets/<name> at runtime.  Cook's authSecrets are
+  //  build-time-only; nothing to emit at the service level.)
 
   lines.push('');
   lines.push('    # docker stop sends SIGTERM; tini forwards it to the parent process,');
