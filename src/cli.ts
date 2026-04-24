@@ -318,7 +318,31 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     );
   }
 
-  const fileCount = 5 + recipesOut.length + (writeEnvFile ? 1 : 0) + credFilesToWrite.length;
+  // BuildKit secret files: one per unique authSecret across sources.
+  // The compose `secrets:` block expects each token in `<outDir>/<NAME>`.
+  // We've already collected the values via prompts/env-file/process.env
+  // (authSecrets dedupe with same-named recipe vars in deriveRequiredVars),
+  // so cook just writes them out — no extra operator step.
+  const authSecretFiles: Array<{ name: string; value: string }> = [];
+  const seenAuthSecrets = new Set<string>();
+  const missingAuthSecrets: string[] = [];
+  for (const src of sources) {
+    if (!src.authSecret || seenAuthSecrets.has(src.authSecret)) continue;
+    seenAuthSecrets.add(src.authSecret);
+    const value = collectedValues[src.authSecret];
+    if (value !== undefined && value !== '') {
+      authSecretFiles.push({ name: src.authSecret, value });
+    } else {
+      missingAuthSecrets.push(src.authSecret);
+    }
+  }
+  for (const name of missingAuthSecrets) {
+    log.warn(
+      `build secret ${name}: no value supplied — file skipped (operator must \`echo ... > ${outDir}/${name} && chmod 600 ${name}\` before \`docker compose build\`)`,
+    );
+  }
+
+  const fileCount = 5 + recipesOut.length + (writeEnvFile ? 1 : 0) + credFilesToWrite.length + authSecretFiles.length;
 
   // Confirm-before-write gate.  Skipped in --no-prompts mode (the operator
   // told us to be non-interactive; bombing into a confirm prompt would
@@ -347,6 +371,11 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
       const content = serializeCredentialFile(cf, credentialValues[cf.path] ?? {});
       const mode = cf.mode ? parseInt(cf.mode, 8) : 0o600;
       writeFileSync(join(outDir, filename), content, { mode });
+    }
+    for (const sec of authSecretFiles) {
+      // BuildKit reads the file content verbatim as the secret value —
+      // no quoting, no trailing newline (some tools care).
+      writeFileSync(join(outDir, sec.name), sec.value, { mode: 0o600 });
     }
     for (const { filename, content } of recipesOut) {
       writeFileSync(join(outDir, 'recipes', filename), content);
