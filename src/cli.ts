@@ -21,6 +21,7 @@ import { generateOverlays } from './generators/overlay.js';
 import { generateEnv } from './generators/env.js';
 import { generateReadme } from './generators/readme.js';
 import {
+  confirmWrite,
   deriveRequiredVars,
   loadEnvFile,
   promptForVars,
@@ -247,6 +248,18 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   // Only write .env if we have values worth writing — otherwise the
   // operator gets only .env.example to copy/edit themselves.
   const writeEnvFile = Object.keys(collectedValues).length > 0;
+  const fileCount = 4 + recipesOut.length + (writeEnvFile ? 1 : 0);
+
+  // Confirm-before-write gate.  Skipped in --no-prompts mode (the operator
+  // told us to be non-interactive; bombing into a confirm prompt would
+  // defeat the flag's purpose).
+  if (flags.prompts !== false) {
+    const ok = await confirmWrite(outDir, fileCount);
+    if (!ok) {
+      log.warn('cancelled by user');
+      return { exitCode: 1, outDir };
+    }
+  }
 
   try {
     mkdirSync(outDir, { recursive: true });
@@ -267,7 +280,6 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   }
 
   const overlayCount = Array.from(overlays.values()).length;
-  const fileCount = 4 + recipesOut.length + (writeEnvFile ? 1 : 0);
   log.success(`wrote ${fileCount} files to ${outDir}`);
   if (overlayCount > 0) {
     log.info(log.dim(`    (${overlayCount} recipe${overlayCount === 1 ? '' : 's'} have overlays applied)`));

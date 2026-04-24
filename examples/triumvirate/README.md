@@ -14,7 +14,7 @@ This example exists for two purposes:
 - Node 20 (for running the Zulip MCP adapter; `npx` for `@zereight/mcp-gitlab`)
 - `tini` as PID 1 (signal forwarding + zombie reaping)
 - The Zulip MCP server (`antra-tess/zulip_mcp` PR #3 / `mcpl-addendum` branch), built and ready at `/zulip_mcp/build/index.js`
-- The four generic Triumvirate recipes (Zulip+GitLab miner, no-MCP reviewer, Zulip clerk staffing channel `knowledge-ai-assistant`, conductor)
+- The four generic Triumvirate recipes (Zulip+GitLab miner, no-MCP reviewer, Zulip clerk that staffs whatever channel you set `ZULIP_CHANNEL` to, conductor)
 
 What's **not** in the image:
 - Your `.env` and `.zuliprc` (mounted from the host at runtime)
@@ -24,7 +24,7 @@ What's **not** in the image:
 
 - **Docker Engine 23+** with Compose v2 (`docker compose ...`, not `docker-compose ...`). BuildKit must be enabled (default in 23+).
 - **An Anthropic API key** ([console.anthropic.com](https://console.anthropic.com/)). Note: four agents run concurrently, so spend will be proportionally higher than a single-agent run.
-- **A Zulip account with admin access**, plus a dedicated bot. See [Step 3 of TRIUMVIRATE-SETUP.md](../../recipes/TRIUMVIRATE-SETUP.md#step-3-create-a-zulip-bot-and-get-credentials) for how to create one and get a `.zuliprc` file. The clerk auto-subscribes to a channel called `knowledge-ai-assistant` — create that channel in Zulip and subscribe your bot to it.
+- **A Zulip account with admin access**, plus a dedicated bot. See [Step 3 of TRIUMVIRATE-SETUP.md](../../recipes/TRIUMVIRATE-SETUP.md#step-3-create-a-zulip-bot-and-get-credentials) for how to create one and get a `.zuliprc` file. The clerk auto-subscribes to whatever channel name you supply via the `ZULIP_CHANNEL` env var — create that channel in Zulip and subscribe your bot to it before starting the container.
 - **A GitLab Personal Access Token** with `read_api` and `read_repository` scopes (add `api` for write access). If you don't use GitLab, remove the `gitlab` block from `recipes/knowledge-miner.json` in this folder before building.
 
 ## Quick start
@@ -101,7 +101,7 @@ The four generic recipes in `recipes/` of this folder are baked into the image a
 
 Common edits:
 
-- **Channel name** — the clerk staffs `knowledge-ai-assistant`. To change: edit `recipes/clerk.json` and replace all three references (the `ZULIP_SUBSCRIBE` env, the wake policy's `channel`, and the system prompt).
+- **Channel name** — set `ZULIP_CHANNEL` in `.env`. The clerk's recipe references `${ZULIP_CHANNEL}` in the `ZULIP_SUBSCRIBE` env, the wake policy's `channel`, and its system prompt — all three are substituted at recipe load time.
 - **Drop GitLab** — if you don't have a GitLab token, edit `recipes/knowledge-miner.json` and remove the `gitlab` entry from `mcpServers` (also remove `GITLAB_TOKEN`/`GITLAB_API_URL` from `.env`).
 - **Add another source** — for an npx-installable MCP server, just add an entry to `mcpServers` in the relevant recipe; no Dockerfile change needed. For a server that needs to be cloned and built, add a build stage to the Dockerfile.
 
@@ -154,5 +154,5 @@ ch-builder-examples/triumvirate/
     ├── triumvirate.json                # conductor; auto-spawns the three children below
     ├── knowledge-miner.json            # miner (Zulip + GitLab)
     ├── knowledge-reviewer.json         # reviewer (no MCP servers; pure LLM critic)
-    └── clerk.json                      # clerk on Zulip channel knowledge-ai-assistant
+    └── clerk.json                      # clerk on Zulip channel ${ZULIP_CHANNEL}
 ```
