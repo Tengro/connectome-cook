@@ -1,9 +1,9 @@
 /**
  * Vendored from connectome-host: forking-knowledge-miner/src/recipe.ts
  * Sync source: github.com/anima-research/connectome-host
- * Last synced: commit a111e79 (merge of upstream/main into feat/recipe-source-metadata,
- *              brings in `fix(recipe): resolve fleet children[].recipe against parent
- *              recipe dir` + enabledTools/disabledTools + activity module config).
+ * Last synced: commit bb40b64 (feat(recipe): credentialFiles schema for auxiliary
+ *              side files).  Earlier syncs covered: a111e79 (parent-dir resolution
+ *              + enabledTools/disabledTools + activity), 6273370 (source metadata).
  *
  * Why vendored: connectome-host isn't published to npm, so cook can't depend
  * on it directly. The recipe schema is small and stable enough that
@@ -72,6 +72,10 @@ export interface RecipeMcpServer {
   reconnectIntervalMs?: number;
   channelSubscription?: 'auto' | 'manual' | string[];
   source?: RecipeMcpServerSource;
+  /** Auxiliary credential / config files this MCP needs at runtime
+   *  (e.g. `.zuliprc`).  Build tooling collects values, writes the file,
+   *  bind-mounts it.  Ignored at runtime by connectome-host's loader. */
+  credentialFiles?: RecipeCredentialFile[];
 }
 
 export interface RecipeMcpServerSource {
@@ -84,6 +88,25 @@ export interface RecipeMcpServerSource {
   authSecret?: string;
   sslBypass?: boolean;
   inContainer?: { path: string };
+}
+
+/** Auxiliary credential / config file an MCP server reads at runtime.
+ *  Build tooling prompts the operator for field values, serializes them
+ *  in the declared format, writes the file at `path`, bind-mounts it. */
+export interface RecipeCredentialFile {
+  path: string;
+  format: 'ini' | 'json' | 'env';
+  section?: string;
+  mode?: string;
+  fields: RecipeCredentialFileField[];
+}
+
+export interface RecipeCredentialFileField {
+  name: string;
+  envOverride?: string;
+  description?: string;
+  placeholder?: string;
+  secret?: boolean;
 }
 
 export interface RecipeWorkspaceMount {
@@ -295,6 +318,62 @@ export function validateRecipe(raw: unknown): Recipe {
           || !(server[field] as unknown[]).every((p) => typeof p === 'string' && p)
         ) {
           throw new Error(`mcpServers.${id}.${field} must be an array of non-empty strings`);
+        }
+      }
+      if (server.credentialFiles !== undefined) {
+        if (!Array.isArray(server.credentialFiles)) {
+          throw new Error(`mcpServers.${id}.credentialFiles must be an array`);
+        }
+        const seenPaths = new Set<string>();
+        for (let i = 0; i < server.credentialFiles.length; i++) {
+          const cf = server.credentialFiles[i] as Record<string, unknown>;
+          if (!cf || typeof cf !== 'object') {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}] must be an object`);
+          }
+          if (typeof cf.path !== 'string' || !cf.path) {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}].path must be a non-empty string`);
+          }
+          if (seenPaths.has(cf.path)) {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}].path "${cf.path}" is duplicated within the same server`);
+          }
+          seenPaths.add(cf.path);
+          if (cf.format !== 'ini' && cf.format !== 'json' && cf.format !== 'env') {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}].format must be 'ini', 'json', or 'env'`);
+          }
+          if (cf.section !== undefined && typeof cf.section !== 'string') {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}].section must be a string`);
+          }
+          if (cf.mode !== undefined && (typeof cf.mode !== 'string' || !/^0?[0-7]{3,4}$/.test(cf.mode))) {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}].mode must be an octal string like "0600"`);
+          }
+          if (!Array.isArray(cf.fields) || cf.fields.length === 0) {
+            throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields must be a non-empty array`);
+          }
+          const seenFieldNames = new Set<string>();
+          for (let j = 0; j < cf.fields.length; j++) {
+            const f = cf.fields[j] as Record<string, unknown>;
+            if (!f || typeof f !== 'object') {
+              throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields[${j}] must be an object`);
+            }
+            if (typeof f.name !== 'string' || !f.name) {
+              throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields[${j}].name must be a non-empty string`);
+            }
+            if (seenFieldNames.has(f.name)) {
+              throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields[${j}].name "${f.name}" is duplicated`);
+            }
+            seenFieldNames.add(f.name);
+            if (f.envOverride !== undefined && (typeof f.envOverride !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(f.envOverride))) {
+              throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields[${j}].envOverride must be a valid env var name`);
+            }
+            for (const optStr of ['description', 'placeholder'] as const) {
+              if (f[optStr] !== undefined && typeof f[optStr] !== 'string') {
+                throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields[${j}].${optStr} must be a string`);
+              }
+            }
+            if (f.secret !== undefined && typeof f.secret !== 'boolean') {
+              throw new Error(`mcpServers.${id}.credentialFiles[${i}].fields[${j}].secret must be a boolean`);
+            }
+          }
         }
       }
     }

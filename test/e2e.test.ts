@@ -46,6 +46,10 @@ describe('cook build against the Triumvirate example', () => {
     expect(existsSync(join(outDir, 'entrypoint.sh'))).toBe(true);
     // No .env because --no-prompts and ANTHROPIC_API_KEY isn't in test env.
     expect(existsSync(join(outDir, '.env'))).toBe(false);
+    // No .zuliprc either: under --no-prompts, the credential file is
+    // skipped when ZULIP_EMAIL/KEY/SITE aren't provided.  Operator drops
+    // their own.  (Setting the env vars would make cook synthesize one.)
+    expect(existsSync(join(outDir, '.zuliprc'))).toBe(false);
   });
 
   test('writes one recipe per walked entry', () => {

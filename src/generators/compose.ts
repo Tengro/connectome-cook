@@ -77,10 +77,10 @@ interface ComposeVolume {
  * `./output` collapse to a single entry (first-write-wins on host name +
  * mode — mirrors source-detector's first-wins policy).
  *
- * Always-included extras:
- *   - `./.zuliprc:/app/.zuliprc:ro` — IF any recipe has an mcpServer that
- *     looks Zulip-related (env.ZULIP_RC_PATH, args mentioning .zuliprc, etc.).
- *     Hacky heuristic; cheap to evaluate.
+ * Credential files (declared via `mcpServers[*].credentialFiles`) get a
+ * read-only file-bind mount each: `./<basename>:<container-path>:ro`.
+ * Replaces the older Zulip-specific heuristic — any MCP that declares a
+ * credential file gets the same treatment.
  */
 function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
   const byContainer = new Map<string, ComposeVolume>();
@@ -115,11 +115,12 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
 
   const volumes = Array.from(byContainer.values());
 
-  // Zulip credentials volume.
-  if (anyRecipeUsesZulip(walks)) {
+  // Declarative credential-file volumes.  One file-bind per unique
+  // credentialFiles[].path across the walked recipes.
+  for (const cf of declaredCredentialFiles(walks)) {
     volumes.push({
-      host: './.zuliprc',
-      container: '/app/.zuliprc',
+      host: `./${cf.hostFilename}`,
+      container: cf.containerPath,
       readOnly: true,
     });
   }
@@ -127,9 +128,33 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
   return volumes;
 }
 
+/** Collect (host filename, container path) for every distinct credential
+ *  file declared across the recipe tree.  Dedup by container path. */
+function declaredCredentialFiles(
+  walks: WalkResult[],
+): Array<{ hostFilename: string; containerPath: string }> {
+  const seen = new Map<string, { hostFilename: string; containerPath: string }>();
+  for (const walk of walks) {
+    for (const server of Object.values(walk.recipe.mcpServers ?? {})) {
+      for (const cf of server.credentialFiles ?? []) {
+        const containerPath = cf.path.startsWith('/')
+          ? cf.path
+          : '/app/' + cf.path.replace(/^\.\//, '').replace(/^\/+/, '');
+        if (seen.has(containerPath)) continue;
+        const hostFilename = cf.path
+          .replace(/^\.\//, '')
+          .replace(/^\/+/, '')
+          .split('/').pop() ?? 'credential';
+        seen.set(containerPath, { hostFilename, containerPath });
+      }
+    }
+  }
+  return Array.from(seen.values());
+}
+
 /** Container-side paths the runtime entrypoint needs to chown before
  *  dropping to bun.  RW workspace mounts + fleet dataDir parents only —
- *  RO mounts and file mounts (.zuliprc) stay as the operator owns them. */
+ *  RO mounts and credential file binds stay as the operator owns them. */
 export function chownTargets(walks: WalkResult[]): string[] {
   const out = new Set<string>();
   for (const v of collectVolumes(walks)) {
@@ -202,38 +227,9 @@ function stripLeadingDotSlash(p: string): string {
   return p.replace(/^\.\//, '').replace(/^\/+/, '');
 }
 
-/**
- * Heuristic: any mcpServer references `.zuliprc` (in args/command/env values)
- * OR has an env entry named `ZULIP_RC_PATH`.  Catches the example shape
- * (`env.ZULIP_RC_PATH = "./.zuliprc"`) without needing to know the exact
- * server name.
- */
-function anyRecipeUsesZulip(walks: WalkResult[]): boolean {
-  for (const walk of walks) {
-    const servers = walk.recipe.mcpServers;
-    if (!servers) continue;
-    for (const server of Object.values(servers)) {
-      if (mcpServerReferencesZulip(server)) return true;
-    }
-  }
-  return false;
-}
-
-function mcpServerReferencesZulip(server: RecipeMcpServer): boolean {
-  if (server.env) {
-    if ('ZULIP_RC_PATH' in server.env) return true;
-    for (const v of Object.values(server.env)) {
-      if (typeof v === 'string' && v.includes('.zuliprc')) return true;
-    }
-  }
-  if (server.command && server.command.includes('.zuliprc')) return true;
-  if (server.args) {
-    for (const arg of server.args) {
-      if (arg.includes('.zuliprc')) return true;
-    }
-  }
-  return false;
-}
+// (Old anyRecipeUsesZulip heuristic removed — credentialFiles makes the
+//  Zulip-specific shape declarative.  Any future MCP that needs a side
+//  file uses the same path: declare credentialFiles in the recipe.)
 
 // ---------------------------------------------------------------------------
 // YAML rendering

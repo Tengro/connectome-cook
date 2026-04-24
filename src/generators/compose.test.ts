@@ -308,12 +308,12 @@ describe('slugify', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Loading a single recipe (clerk) — verify Zulip detection works on a
-//    recipe whose env contains ZULIP_RC_PATH but no other Zulip markers.
+// 5. Credential file binds — declarative `credentialFiles` in a recipe
+//    should produce one read-only file-bind per declared file.
 // ---------------------------------------------------------------------------
 
-describe('generateCompose — Zulip detection via ZULIP_RC_PATH env', () => {
-  test('emits .zuliprc volume when only env.ZULIP_RC_PATH is set', async () => {
+describe('generateCompose — credentialFiles binds', () => {
+  test('emits read-only file bind for each declared credential file', async () => {
     const path = resolve(RECIPES_DIR, 'clerk.json');
     const recipe = await loadRecipeRaw(path);
     const walk: WalkResult = { path, recipe };
@@ -325,6 +325,7 @@ describe('generateCompose — Zulip detection via ZULIP_RC_PATH env', () => {
       options: defaultOptions(),
     });
 
+    // The example clerk declares ./.zuliprc as a credential file.
     expect(out).toContain('./.zuliprc:/app/.zuliprc:ro');
   });
 });

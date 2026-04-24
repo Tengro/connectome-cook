@@ -26,8 +26,17 @@ import {
   deriveRequiredVars,
   loadEnvFile,
   promptForVars,
+  promptForCredentialFields,
   resolvePresent,
+  type CredentialFileField,
 } from './prompts.js';
+import {
+  collectCredentialFiles,
+  hostFilename,
+  resolveFieldValue,
+  serializeCredentialFile,
+  type CredentialFileSpec,
+} from './credentials.js';
 import { listTemplates, scaffoldRecipe, type TemplateName } from './init.js';
 
 const pkg = JSON.parse(
@@ -214,6 +223,47 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     }
   }
 
+  // Credential files: walk the recipe tree, resolve each field via env
+  // override, then prompt for the rest (or warn under --no-prompts).
+  const credentialFiles = collectCredentialFiles(walks);
+  const credentialValues: Record<string, Record<string, string>> = {};
+  const missingCredFields: CredentialFileField[] = [];
+  for (const cf of credentialFiles) {
+    credentialValues[cf.path] = {};
+    for (const field of cf.fields) {
+      const val = resolveFieldValue(field, envFileValues);
+      if (val !== undefined) {
+        credentialValues[cf.path]![field.name] = val;
+      } else {
+        missingCredFields.push({
+          filePath: cf.path,
+          fieldName: field.name,
+          envOverride: field.envOverride,
+          description: field.description,
+          placeholder: field.placeholder,
+          secret: field.secret,
+        });
+      }
+    }
+  }
+  if (missingCredFields.length > 0) {
+    if (flags.prompts === false) {
+      log.warn(
+        `--no-prompts: ${missingCredFields.length} credential-file field${missingCredFields.length === 1 ? '' : 's'} ` +
+        `unset — files will be skipped (operator must hand-place them before \`docker compose up\`)`,
+      );
+    } else {
+      const result = await promptForCredentialFields(missingCredFields);
+      if (result.cancelled) {
+        log.warn('cancelled by user');
+        return { exitCode: 1, outDir };
+      }
+      for (const [path, fields] of Object.entries(result.values)) {
+        credentialValues[path] = { ...(credentialValues[path] ?? {}), ...fields };
+      }
+    }
+  }
+
   const buildOptions: BuildOptions = {
     outDir,
     noPrompts: flags.prompts === false,
@@ -251,7 +301,24 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   // Only write .env if we have values worth writing — otherwise the
   // operator gets only .env.example to copy/edit themselves.
   const writeEnvFile = Object.keys(collectedValues).length > 0;
-  const fileCount = 5 + recipesOut.length + (writeEnvFile ? 1 : 0);
+
+  // Credential files we have AT LEAST ONE value for; complete-skip files
+  // get omitted so the operator notices via the warn rather than getting
+  // a half-empty .zuliprc that fails confusingly at runtime.
+  const credFilesToWrite = credentialFiles.filter((cf) =>
+    Object.keys(credentialValues[cf.path] ?? {}).length === cf.fields.length,
+  );
+  const credFilesPartial = credentialFiles.filter((cf) => {
+    const got = Object.keys(credentialValues[cf.path] ?? {}).length;
+    return got > 0 && got < cf.fields.length;
+  });
+  for (const cf of credFilesPartial) {
+    log.warn(
+      `${cf.path}: only partial values supplied (${Object.keys(credentialValues[cf.path] ?? {}).length}/${cf.fields.length}) — file skipped`,
+    );
+  }
+
+  const fileCount = 5 + recipesOut.length + (writeEnvFile ? 1 : 0) + credFilesToWrite.length;
 
   // Confirm-before-write gate.  Skipped in --no-prompts mode (the operator
   // told us to be non-interactive; bombing into a confirm prompt would
@@ -274,6 +341,12 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     writeFileSync(join(outDir, 'entrypoint.sh'), entrypoint, { mode: 0o755 });
     if (writeEnvFile) {
       writeFileSync(join(outDir, '.env'), renderEnvFile(collectedValues));
+    }
+    for (const cf of credFilesToWrite) {
+      const filename = hostFilename(cf);
+      const content = serializeCredentialFile(cf, credentialValues[cf.path] ?? {});
+      const mode = cf.mode ? parseInt(cf.mode, 8) : 0o600;
+      writeFileSync(join(outDir, filename), content, { mode });
     }
     for (const { filename, content } of recipesOut) {
       writeFileSync(join(outDir, 'recipes', filename), content);

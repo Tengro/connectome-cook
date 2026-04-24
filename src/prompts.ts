@@ -166,3 +166,58 @@ export async function confirmWrite(outDir: string, fileCount: number): Promise<b
   });
   return response.go === true;
 }
+
+/** One field of a credential file the operator needs to fill in. */
+export interface CredentialFileField {
+  /** Where the field will be written: file path + field name within file. */
+  filePath: string;
+  fieldName: string;
+  /** Optional env var that overrides the prompt (already-resolved values
+   *  are filtered out before this list is passed to promptForCredentialFields). */
+  envOverride?: string;
+  description?: string;
+  placeholder?: string;
+  secret?: boolean;
+}
+
+/** Result: values keyed first by file path, then by field name. */
+export interface CredentialPromptResult {
+  values: Record<string, Record<string, string>>;
+  cancelled: boolean;
+}
+
+/** Interactive: prompt for every missing credential-file field.  Masks
+ *  secret fields.  Press Enter to skip; cook then warns rather than
+ *  silently writing a half-complete file. */
+export async function promptForCredentialFields(
+  fields: CredentialFileField[],
+): Promise<CredentialPromptResult> {
+  if (fields.length === 0) return { values: {}, cancelled: false };
+
+  process.stdout.write(`\nCook needs values for ${fields.length} credential-file field${fields.length === 1 ? '' : 's'}.\n`);
+  process.stdout.write('Press Enter to skip a field (the file will be written without it).\n\n');
+
+  const values: Record<string, Record<string, string>> = {};
+  let cancelled = false;
+  for (const f of fields) {
+    const fileBase = f.filePath.replace(/^\.\//, '').replace(/^\/+/, '').split('/').pop() ?? f.filePath;
+    const desc = f.description ? `  ${f.description}\n` : '';
+    const placeholder = f.placeholder ? `  ${f.placeholder}\n` : '';
+    const envHint = f.envOverride ? `  (set ${f.envOverride}=... in env to skip this prompt)\n` : '';
+    const response = await promptsLib({
+      type: f.secret ? 'password' : 'text',
+      name: 'value',
+      message: `${fileBase}::${f.fieldName}\n${desc}${placeholder}${envHint}`,
+      initial: '',
+    });
+    if (response.value === undefined) {
+      cancelled = true;
+      break;
+    }
+    if (response.value !== '') {
+      if (!values[f.filePath]) values[f.filePath] = {};
+      values[f.filePath]![f.fieldName] = response.value as string;
+    }
+  }
+  return { values, cancelled };
+}

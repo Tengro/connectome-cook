@@ -29,7 +29,20 @@
       "source": {
         "url": "https://github.com/antra-tess/zulip_mcp.git",
         "install": "npm"
-      }
+      },
+      "credentialFiles": [
+        {
+          "path": "./.zuliprc",
+          "format": "ini",
+          "section": "api",
+          "mode": "0600",
+          "fields": [
+            { "name": "email", "envOverride": "ZULIP_EMAIL", "description": "Bot email", "placeholder": "bot@example.zulipchat.com" },
+            { "name": "key",   "envOverride": "ZULIP_KEY",   "description": "Bot API key",      "placeholder": "abc123...", "secret": true },
+            { "name": "site",  "envOverride": "ZULIP_SITE",  "description": "Zulip server URL", "placeholder": "https://example.zulipchat.com" }
+          ]
+        }
+      ]
     }
   },
 
