@@ -127,6 +127,18 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
   return volumes;
 }
 
+/** Container-side paths the runtime entrypoint needs to chown before
+ *  dropping to bun.  RW workspace mounts + fleet dataDir parents only —
+ *  RO mounts and file mounts (.zuliprc) stay as the operator owns them. */
+export function chownTargets(walks: WalkResult[]): string[] {
+  const out = new Set<string>();
+  for (const v of collectVolumes(walks)) {
+    if (v.readOnly) continue;
+    out.add(v.container);
+  }
+  return Array.from(out).sort();
+}
+
 /** Collect every fleet child's dataDir (explicit or `./data/<child-name>`
  *  default) across all walks, then return the minimal set of host paths
  *  to bind-mount so all of them are persistent.  When all dataDirs share

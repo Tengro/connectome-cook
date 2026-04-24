@@ -43,6 +43,7 @@ describe('cook build against the Triumvirate example', () => {
     expect(existsSync(join(outDir, 'docker-compose.yml'))).toBe(true);
     expect(existsSync(join(outDir, '.env.example'))).toBe(true);
     expect(existsSync(join(outDir, 'README.md'))).toBe(true);
+    expect(existsSync(join(outDir, 'entrypoint.sh'))).toBe(true);
     // No .env because --no-prompts and ANTHROPIC_API_KEY isn't in test env.
     expect(existsSync(join(outDir, '.env'))).toBe(false);
   });
@@ -64,8 +65,9 @@ describe('cook build against the Triumvirate example', () => {
     expect(dockerfile).toMatch(/ARG CH_REPO_URL/);
     // Runtime stage
     expect(dockerfile).toMatch(/FROM oven\/bun:1-debian AS runtime/);
-    expect(dockerfile).toMatch(/USER bun/);
-    expect(dockerfile).toMatch(/ENTRYPOINT \["tini"/);
+    // Cook entrypoint: runs as root, drops to bun via gosu (no USER directive).
+    expect(dockerfile).toMatch(/COPY entrypoint\.sh \/usr\/local\/bin\/cook-entrypoint/);
+    expect(dockerfile).toMatch(/ENTRYPOINT \["tini", "--", "\/usr\/local\/bin\/cook-entrypoint"\]/);
     expect(dockerfile).toMatch(/CMD \["bun", "src\/index\.ts", "recipes\/triumvirate\.json"\]/);
   });
 

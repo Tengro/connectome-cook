@@ -20,6 +20,7 @@ import { generateCompose } from './generators/compose.js';
 import { generateOverlays } from './generators/overlay.js';
 import { generateEnv } from './generators/env.js';
 import { generateReadme } from './generators/readme.js';
+import { generateEntrypoint } from './generators/entrypoint.js';
 import {
   confirmWrite,
   deriveRequiredVars,
@@ -228,12 +229,14 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   let compose: string;
   let envExample: string;
   let readme: string;
+  let entrypoint: string;
   let overlays: Map<string, Partial<Recipe>>;
   try {
     dockerfile = generateDockerfile(input);
     compose = generateCompose(input);
     envExample = generateEnv(input);
     readme = generateReadme(input);
+    entrypoint = generateEntrypoint(input);
     overlays = generateOverlays(input);
   } catch (err) {
     log.error(`generator failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -248,7 +251,7 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   // Only write .env if we have values worth writing — otherwise the
   // operator gets only .env.example to copy/edit themselves.
   const writeEnvFile = Object.keys(collectedValues).length > 0;
-  const fileCount = 4 + recipesOut.length + (writeEnvFile ? 1 : 0);
+  const fileCount = 5 + recipesOut.length + (writeEnvFile ? 1 : 0);
 
   // Confirm-before-write gate.  Skipped in --no-prompts mode (the operator
   // told us to be non-interactive; bombing into a confirm prompt would
@@ -268,6 +271,7 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     writeFileSync(join(outDir, 'docker-compose.yml'), compose);
     writeFileSync(join(outDir, '.env.example'), envExample);
     writeFileSync(join(outDir, 'README.md'), readme);
+    writeFileSync(join(outDir, 'entrypoint.sh'), entrypoint, { mode: 0o755 });
     if (writeEnvFile) {
       writeFileSync(join(outDir, '.env'), renderEnvFile(collectedValues));
     }

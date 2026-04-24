@@ -268,8 +268,9 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   lines.push(`FROM ${BUN_BASE_IMAGE} AS runtime`);
   lines.push('');
 
-  // apt step — tini, ca-certificates, optional python3.
-  const aptPackages = ['tini', 'ca-certificates'];
+  // apt step — tini, ca-certificates, gosu (for entrypoint user-drop),
+  // optional python3.
+  const aptPackages = ['tini', 'ca-certificates', 'gosu'];
   if (needsPython) aptPackages.push('python3', 'python3-venv');
   lines.push('RUN apt-get update \\');
   lines.push(` && apt-get install -y --no-install-recommends ${aptPackages.join(' ')} \\`);
@@ -338,11 +339,19 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   }
   lines.push('');
 
-  lines.push('USER bun');
+  // Cook entrypoint: runs as root, chowns RW bind-mount targets
+  // (docker-compose creates missing host paths as root if absent), then
+  // exec-drops to the bun user via gosu.  This is the standard Postgres-
+  // style "init as root, work as service user" pattern.  We deliberately
+  // do NOT set USER bun here — gosu handles the drop at runtime.
+  lines.push('# Entrypoint script — runs as root, chowns bind targets, drops to bun.');
+  lines.push('COPY entrypoint.sh /usr/local/bin/cook-entrypoint');
+  lines.push('RUN chmod +x /usr/local/bin/cook-entrypoint');
   lines.push('');
+
   lines.push('ENV DATA_DIR=/app/data');
   lines.push('');
-  lines.push('ENTRYPOINT ["tini", "--"]');
+  lines.push('ENTRYPOINT ["tini", "--", "/usr/local/bin/cook-entrypoint"]');
   lines.push(`CMD ["bun", "src/index.ts", "recipes/${parentRecipeBasename}"]`);
 
   return lines.join('\n');

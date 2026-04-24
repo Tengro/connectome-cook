@@ -78,9 +78,11 @@ describe('generateDockerfile — triumvirate fixture', () => {
     // Runtime stage COPY for zulip into /zulip_mcp.
     expect(dockerfile).toContain('COPY --from=zulip-mcp-build /build/zulip_mcp /zulip_mcp');
 
-    // Required runtime-stage primitives.
-    expect(dockerfile).toContain('USER bun');
-    expect(dockerfile).toContain('ENTRYPOINT ["tini", "--"]');
+    // Required runtime-stage primitives.  Cook's entrypoint runs as root,
+    // chowns bind targets, and exec-drops to bun via gosu — no USER directive.
+    expect(dockerfile).toContain('COPY entrypoint.sh /usr/local/bin/cook-entrypoint');
+    expect(dockerfile).toContain('ENTRYPOINT ["tini", "--", "/usr/local/bin/cook-entrypoint"]');
+    expect(dockerfile).toContain('gosu');
 
     // CMD ends with the parent recipe basename.
     expect(dockerfile).toMatch(/CMD\s+\["bun",\s*"src\/index\.ts",\s*"recipes\/triumvirate\.json"\]/);
