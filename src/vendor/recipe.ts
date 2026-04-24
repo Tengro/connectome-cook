@@ -1,9 +1,16 @@
 /**
  * Vendored from connectome-host: forking-knowledge-miner/src/recipe.ts
  * Sync source: github.com/anima-research/connectome-host
- * Last synced: commit bb40b64 (feat(recipe): credentialFiles schema for auxiliary
- *              side files).  Earlier syncs covered: a111e79 (parent-dir resolution
- *              + enabledTools/disabledTools + activity), 6273370 (source metadata).
+ * Last synced: commit f4b6588 (feat(recipe): \${VAR:-default} substitution
+ *              syntax — adds optional-with-fallback form to substituteEnvVars).
+ *              Earlier syncs: bb40b64 (credentialFiles), a111e79 (parent-dir
+ *              resolution + enabledTools/disabledTools + activity), 6273370
+ *              (source metadata).
+ *
+ * Note: cook does NOT vendor `substituteEnvVars` itself — `loadRecipeRaw`
+ * deliberately skips substitution so the env-collector can scan placeholders
+ * BEFORE substitution.  But cook's env-collector regex MUST match upstream's
+ * substituteEnvVars regex byte-for-byte; see src/env-collector.ts.
  *
  * Why vendored: connectome-host isn't published to npm, so cook can't depend
  * on it directly. The recipe schema is small and stable enough that

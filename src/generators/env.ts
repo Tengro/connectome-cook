@@ -133,11 +133,13 @@ function buildRequiredSection(envVars: EnvVar[]): string[] {
   lines.push(`ANTHROPIC_API_KEY=${placeholderFor('ANTHROPIC_API_KEY')}`);
   lines.push('');
 
-  // Recipe-referenced vars that aren't ANTHROPIC_API_KEY (already emitted)
-  // and aren't optional-flavored.
+  // Recipe-referenced vars that aren't ANTHROPIC_API_KEY (already emitted),
+  // aren't optional-flavored by name heuristic, AND don't carry a recipe-
+  // declared default (`${VAR:-x}` form).  Defaulted vars go to Optional.
   for (const envVar of envVars) {
     if (envVar.name === 'ANTHROPIC_API_KEY') continue;
     if (isOptionalName(envVar.name)) continue;
+    if (envVar.defaultValue !== undefined) continue;
     lines.push(describeUsage(envVar));
     lines.push(`${envVar.name}=${placeholderFor(envVar.name)}`);
     lines.push('');
@@ -146,18 +148,26 @@ function buildRequiredSection(envVars: EnvVar[]): string[] {
   return lines;
 }
 
-/** Optional section: recipe-referenced vars matching the optional heuristic, commented out. */
+/** Optional section: vars matching the heuristic OR carrying a recipe-
+ *  declared default (`${VAR:-x}`).  Commented out — operator uncomments
+ *  to override.  Defaulted vars get the recipe's default in the comment. */
 function buildOptionalSection(envVars: EnvVar[]): string[] {
   const lines: string[] = [];
-  const optionals = envVars.filter((v) => isOptionalName(v.name));
+  const optionals = envVars.filter(
+    (v) => isOptionalName(v.name) || v.defaultValue !== undefined,
+  );
   if (optionals.length === 0) return lines;
 
   lines.push('# --- Optional ---');
   lines.push('');
   for (const envVar of optionals) {
     lines.push(describeUsage(envVar));
-    // Commented-out by default — operator uncomments to override.
-    lines.push(`# ${envVar.name}=${placeholderFor(envVar.name)}`);
+    if (envVar.defaultValue !== undefined) {
+      lines.push(`# Recipe default if unset: ${JSON.stringify(envVar.defaultValue)}`);
+      lines.push(`# ${envVar.name}=${envVar.defaultValue}`);
+    } else {
+      lines.push(`# ${envVar.name}=${placeholderFor(envVar.name)}`);
+    }
     lines.push('');
   }
   return lines;

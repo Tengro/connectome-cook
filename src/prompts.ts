@@ -28,6 +28,10 @@ export interface RequiredVar {
   scope: 'runtime' | 'build-secret';
   /** Optional placeholder shown as the default-but-don't-use suggestion. */
   placeholder?: string;
+  /** When set, the recipe references this var as `${VAR:-default}` —
+   *  cook treats it as optional (skipping prompts to that var doesn't
+   *  block the build; the recipe loader applies the default at runtime). */
+  defaultValue?: string;
 }
 
 /** Result: collected values plus a flag set when the user cancelled
@@ -51,7 +55,14 @@ export function deriveRequiredVars(envVars: EnvVar[], sources: McpSource[]): Req
     const consumer = v.usedIn[0]
       ? `${v.usedIn[0].recipePath.split('/').pop()}:${v.usedIn[0].jsonPath}`
       : '<unknown>';
-    out.push({ name: v.name, consumer, scope: 'runtime', placeholder: placeholderFor(v.name) });
+    const required: RequiredVar = {
+      name: v.name,
+      consumer,
+      scope: 'runtime',
+      placeholder: placeholderFor(v.name),
+    };
+    if (v.defaultValue !== undefined) required.defaultValue = v.defaultValue;
+    out.push(required);
   }
   const seenSecrets = new Set<string>();
   for (const src of sources) {
@@ -139,10 +150,13 @@ export async function promptForVars(missing: RequiredVar[]): Promise<PromptResul
   let cancelled = false;
   for (const v of missing) {
     const scopeNote = v.scope === 'build-secret' ? ' [build-time secret]' : '';
+    const optionalNote = v.defaultValue !== undefined
+      ? ` [optional, default: ${JSON.stringify(v.defaultValue)}]`
+      : '';
     const response = await promptsLib({
       type: 'text',
       name: 'value',
-      message: `${v.name}${scopeNote}\n  ${v.consumer}\n  ${v.placeholder ?? ''}\n`,
+      message: `${v.name}${scopeNote}${optionalNote}\n  ${v.consumer}\n  ${v.placeholder ?? ''}\n`,
       initial: '',
     });
     if (response.value === undefined) {

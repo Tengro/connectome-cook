@@ -12,7 +12,16 @@
  * variable is referenced.
  *
  * The placeholder pattern matches connectome-host's `substituteEnvVars`:
- *   /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+ *   /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g
+ *
+ * Both forms are recognized:
+ *   - `${VAR}` — required.
+ *   - `${VAR:-default}` — optional with literal fallback.  When seen, the
+ *     EnvVar entry carries `defaultValue` so prompts can mark it optional.
+ *
+ * If a var appears in both forms across the tree (rare but possible), the
+ * first form wins for `defaultValue` — first-write-wins matches our other
+ * dedup policies.  The plain `${VAR}` form leaves `defaultValue` undefined.
  *
  * Multiple occurrences of the same `${VAR}` inside a single string value
  * collapse to one EnvVarUse for that path — recording the same path twice
@@ -22,7 +31,7 @@
 import type { EnvVar, EnvVarUse, WalkResult } from './types.js';
 
 /** Pattern matching connectome-host's `substituteEnvVars`. */
-const VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
 
 /** A JS identifier that doesn't need bracket-quoting in a dotted path. */
 const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
@@ -82,7 +91,7 @@ function walk(
  * into a deduplicated `EnvVar[]` sorted by `name` for stable output.
  */
 export function collectEnvVars(walks: WalkResult[]): EnvVar[] {
-  const byName = new Map<string, EnvVarUse[]>();
+  const byName = new Map<string, { uses: EnvVarUse[]; defaultValue?: string }>();
 
   for (const walk_ of walks) {
     walk(walk_.recipe, '', (s, p) => {
@@ -95,22 +104,32 @@ export function collectEnvVars(walks: WalkResult[]): EnvVar[] {
       let match: RegExpExecArray | null;
       while ((match = VAR_PATTERN.exec(s)) !== null) {
         const name = match[1]!;
+        const defaultValue = match[2]; // undefined when plain `${VAR}` form
         if (seenInString.has(name)) continue;
         seenInString.add(name);
 
-        let uses = byName.get(name);
-        if (!uses) {
-          uses = [];
-          byName.set(name, uses);
+        let entry = byName.get(name);
+        if (!entry) {
+          entry = { uses: [] };
+          if (defaultValue !== undefined) entry.defaultValue = defaultValue;
+          byName.set(name, entry);
         }
-        uses.push({ recipePath: walk_.path, jsonPath: p });
+        // First-write-wins on default — if this occurrence has a default
+        // and we haven't recorded one yet, capture it.  (Keeps behavior
+        // simple when the same var appears with different defaults.)
+        if (entry.defaultValue === undefined && defaultValue !== undefined) {
+          entry.defaultValue = defaultValue;
+        }
+        entry.uses.push({ recipePath: walk_.path, jsonPath: p });
       }
     });
   }
 
   const out: EnvVar[] = [];
-  for (const [name, usedIn] of byName) {
-    out.push({ name, usedIn });
+  for (const [name, entry] of byName) {
+    const v: EnvVar = { name, usedIn: entry.uses };
+    if (entry.defaultValue !== undefined) v.defaultValue = entry.defaultValue;
+    out.push(v);
   }
   out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return out;

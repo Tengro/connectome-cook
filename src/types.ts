@@ -60,11 +60,16 @@ export interface SourceRef {
   mcpServerName: string;
 }
 
-/** An environment variable discovered by scanning recipe JSON for `${VAR}`. */
+/** An environment variable discovered by scanning recipe JSON for `${VAR}`
+ *  or `${VAR:-default}`. */
 export interface EnvVar {
   name: string;
   /** Everywhere this variable is referenced. */
   usedIn: EnvVarUse[];
+  /** When set, the recipe references this var as `${VAR:-default}` — the
+   *  literal default text falls back if the operator doesn't supply a
+   *  value.  Cook's prompt path treats defaulted vars as optional. */
+  defaultValue?: string;
 }
 
 export interface EnvVarUse {
