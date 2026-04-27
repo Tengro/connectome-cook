@@ -42,7 +42,6 @@ import type {
   WalkResult,
 } from '../types.js';
 import type {
-  Recipe,
   RecipeMcpServer,
   RecipeWorkspaceMount,
 } from '../vendor/recipe.js';

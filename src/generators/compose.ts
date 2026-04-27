@@ -18,7 +18,7 @@
  */
 
 import type { GeneratorInput, McpSource, WalkResult } from '../types.js';
-import type { RecipeWorkspaceMount, RecipeMcpServer } from '../vendor/recipe.js';
+import type { RecipeWorkspaceMount } from '../vendor/recipe.js';
 import { slugify } from '../slug.js';
 export { slugify };
 
@@ -42,22 +42,35 @@ export function generateCompose(input: GeneratorInput): string {
   const imageName = input.options.imageName ?? `${serviceName}:latest`;
 
   const volumes = collectVolumes(input.walks);
-  // Dedupe authSecrets by name — two sources can declare the same
-  // build-time secret (e.g. both notion-mcp and data-lineage on git.ath
-  // using GITLAB_TOKEN), but compose only wants one secret entry per name.
-  const secrets: McpSource[] = [];
-  const seenSecretNames = new Set<string>();
+  // Build-time secrets from mcpServers[].source.authSecret — deduped by name.
+  const buildSecrets: McpSource[] = [];
+  const seenAuthSecrets = new Set<string>();
   for (const s of input.sources) {
-    if (!s.authSecret || seenSecretNames.has(s.authSecret)) continue;
-    seenSecretNames.add(s.authSecret);
-    secrets.push(s);
+    if (!s.authSecret || seenAuthSecrets.has(s.authSecret)) continue;
+    seenAuthSecrets.add(s.authSecret);
+    buildSecrets.push(s);
+  }
+
+  // Sidecar services from the parent recipe's `services` field.  Sidecars
+  // can reference their own runtime secrets (e.g. WIKI_DB_PASSWORD); cook
+  // writes those as 0600 files just like authSecrets.
+  const sidecars = parent.recipe.services ?? [];
+
+  // Top-level secrets block is the union of build-time auth secrets +
+  // sidecar runtime secrets.  Deduped by name.
+  const allSecretNames = new Set<string>();
+  for (const s of buildSecrets) allSecretNames.add(s.authSecret!);
+  for (const svc of sidecars) {
+    for (const sec of svc.secrets ?? []) allSecretNames.add(sec);
   }
 
   return renderCompose({
     serviceName,
     imageName,
     volumes,
-    secrets,
+    buildSecrets,
+    sidecars,
+    allSecretNames: Array.from(allSecretNames).sort(),
   });
 }
 
@@ -67,6 +80,23 @@ export function generateCompose(input: GeneratorInput): string {
 
 function deriveServiceName(recipeName: string): string {
   return slugify(recipeName);
+}
+
+/** Quote a value for safe inclusion in a docker-compose YAML environment
+ *  block.  YAML interprets bareword values like `yes`/`no`/`null`/`on` as
+ *  booleans; numbers as numbers; values with `:` as keys.  Quoting with
+ *  double quotes (and escaping `"` and `\\`) is the universally safe form.
+ *  We don't escape `$` because compose still wants to interpolate `${VAR}`
+ *  references inside the value (that's part of compose's contract).
+ *
+ *  NB: distinct from `escapeForEnvFile` (cli.ts) — that one formats
+ *  values for `.env` files, where `$` MUST be escaped to prevent compose
+ *  from interpolating substrings like `${M5qt58t}` out of secret values.
+ *  Different file format, different rules; they do NOT share a core. */
+function quoteForComposeEnvBlock(value: string): string {
+  if (value === '') return '""';
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +162,20 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
       container: cf.containerPath,
       readOnly: true,
     });
+  }
+
+  // Top-level containerTemplateFiles on the parent recipe — agent-side
+  // generated config files (e.g. mediawiki-mcp-server's config.json) that
+  // need a bind mount at the declared in-container path.
+  const parent = walks[0];
+  if (parent) {
+    for (const tf of parent.recipe.containerTemplateFiles ?? []) {
+      volumes.push({
+        host: `./${tf.hostPath.replace(/^\.\//, '').replace(/^\/+/, '')}`,
+        container: tf.inContainer,
+        readOnly: true,
+      });
+    }
   }
 
   return volumes;
@@ -248,7 +292,13 @@ interface RenderInput {
   serviceName: string;
   imageName: string;
   volumes: ComposeVolume[];
-  secrets: McpSource[];
+  /** Build-time auth secrets from mcpServers[].source.authSecret. */
+  buildSecrets: McpSource[];
+  /** Sidecar service entries from the parent recipe's `services` field. */
+  sidecars: import('../vendor/recipe.js').RecipeSidecarService[];
+  /** Union of every secret name (build + sidecar) that needs a top-level
+   *  secrets entry.  Sorted for deterministic output. */
+  allSecretNames: string[];
 }
 
 const HEADER = [
@@ -269,7 +319,7 @@ const HEADER = [
 ].join('\n');
 
 function renderCompose(input: RenderInput): string {
-  const { serviceName, imageName, volumes, secrets } = input;
+  const { serviceName, imageName, volumes, buildSecrets, sidecars, allSecretNames } = input;
 
   const lines: string[] = [];
   lines.push(HEADER);
@@ -281,14 +331,14 @@ function renderCompose(input: RenderInput): string {
   lines.push('    build:');
   lines.push('      context: .');
   lines.push('      dockerfile: Dockerfile');
-  if (secrets.length > 0) {
+  if (buildSecrets.length > 0) {
     // Build-time secrets: `docker compose build` only passes secrets to
     // the build when they're declared under `build.secrets`.  The
     // service-level `secrets:` further down handles runtime; build-time
     // is a separate plumbing.  Both reference the same top-level
     // `secrets:` block at the bottom of the file.
     lines.push('      secrets:');
-    for (const s of secrets) {
+    for (const s of buildSecrets) {
       lines.push(`        - ${s.authSecret}`);
     }
   }
@@ -312,25 +362,82 @@ function renderCompose(input: RenderInput): string {
     }
   }
 
-  // (Service-level `secrets:` is for RUNTIME secret access — agents
-  //  reading /run/secrets/<name> at runtime.  Cook's authSecrets are
-  //  build-time-only; nothing to emit at the service level.)
-
   lines.push('');
   lines.push('    # docker stop sends SIGTERM; tini forwards it to the parent process,');
   lines.push('    # which has its own graceful-shutdown logic for any fleet children.');
   lines.push('    # 30s gives the slowest child time to flush state.');
   lines.push('    stop_grace_period: 30s');
 
-  if (secrets.length > 0) {
+  // Sidecar services — each as its own service entry under the same `services:`
+  // top-level block.  Cook emits in declaration order from the recipe.
+  for (const svc of sidecars) {
+    lines.push('');
+    lines.push(`  ${svc.name}:`);
+    lines.push(`    image: ${svc.image}`);
+    lines.push(`    container_name: ${svc.name}`);
+    if (svc.restart) {
+      lines.push(`    restart: ${svc.restart}`);
+    } else {
+      // Sensible default — operator probably wants sidecars to come back
+      // after a host reboot or transient crash.
+      lines.push('    restart: unless-stopped');
+    }
+    if (svc.dependsOn && svc.dependsOn.length > 0) {
+      lines.push('    depends_on:');
+      for (const dep of svc.dependsOn) {
+        lines.push(`      - ${dep}`);
+      }
+    }
+    if (svc.ports && svc.ports.length > 0) {
+      lines.push('    ports:');
+      for (const p of svc.ports) {
+        lines.push(`      - "${p}"`);
+      }
+    }
+    if (svc.environment && Object.keys(svc.environment).length > 0) {
+      lines.push('    environment:');
+      for (const [k, v] of Object.entries(svc.environment)) {
+        // Quote values defensively — docker-compose's env interpretation
+        // is happy with quoted strings, and this avoids surprises with
+        // values that look like YAML special tokens (yes/no/null/...).
+        lines.push(`      ${k}: ${quoteForComposeEnvBlock(v)}`);
+      }
+    }
+    if (svc.volumes && svc.volumes.length > 0) {
+      lines.push('    volumes:');
+      for (const v of svc.volumes) {
+        const suffix = v.readOnly ? ':ro' : '';
+        lines.push(`      - ${v.source}:${v.target}${suffix}`);
+      }
+    }
+    if (svc.secrets && svc.secrets.length > 0) {
+      lines.push('    secrets:');
+      for (const sec of svc.secrets) {
+        lines.push(`      - ${sec}`);
+      }
+    }
+    if (svc.healthcheck) {
+      const hc = svc.healthcheck;
+      lines.push('    healthcheck:');
+      const testStr = JSON.stringify(hc.test);
+      lines.push(`      test: ${testStr}`);
+      if (hc.interval) lines.push(`      interval: ${hc.interval}`);
+      if (hc.timeout) lines.push(`      timeout: ${hc.timeout}`);
+      if (hc.retries !== undefined) lines.push(`      retries: ${hc.retries}`);
+      if (hc.startPeriod) lines.push(`      start_period: ${hc.startPeriod}`);
+    }
+  }
+
+  if (allSecretNames.length > 0) {
     lines.push('');
     lines.push('# Secrets are populated from files of the same name in the cook output');
-    lines.push('# directory. Put each token in a file (chmod 600) before `docker compose');
-    lines.push('# up`. See .env.example / README.md for the list and how to source them.');
+    lines.push('# directory. Cook auto-writes each file (mode 0600) from collected env');
+    lines.push('# values; operator can override by editing/replacing the file before');
+    lines.push('# `docker compose build` (build-time secrets) or `up` (runtime secrets).');
     lines.push('secrets:');
-    for (const s of secrets) {
-      lines.push(`  ${s.authSecret}:`);
-      lines.push(`    file: ./${s.authSecret}`);
+    for (const name of allSecretNames) {
+      lines.push(`  ${name}:`);
+      lines.push(`    file: ./${name}`);
     }
   }
 

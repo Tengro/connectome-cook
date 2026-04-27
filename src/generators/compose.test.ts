@@ -70,12 +70,17 @@ describe('generateCompose — triumvirate fixture', () => {
     }
   });
 
-  test('services map has exactly one service', async () => {
+  test('services map has agent + sidecars (mediawiki + mariadb)', async () => {
     const out = generateCompose(await buildInput());
     const parsed = tryParseYaml(out);
     if (parsed !== null) {
       const services = (parsed as { services: Record<string, unknown> }).services;
-      expect(Object.keys(services)).toHaveLength(1);
+      // Agent service + 2 sidecars from the example's services declaration.
+      expect(Object.keys(services).sort()).toEqual([
+        'knowledge-mining-triumvirate',
+        'mariadb',
+        'mediawiki',
+      ]);
     } else {
       // Fallback: count two-space-indent keys directly under `services:`.
       const lines = out.split('\n');
@@ -86,7 +91,7 @@ describe('generateCompose — triumvirate fixture', () => {
         if (/^[A-Za-z]/.test(line)) break; // next top-level key
         if (/^ {2}[a-zA-Z0-9_-]+:/.test(line)) count++;
       }
-      expect(count).toBe(1);
+      expect(count).toBe(3); // agent + mediawiki + mariadb
     }
   });
 
@@ -327,5 +332,96 @@ describe('generateCompose — credentialFiles binds', () => {
 
     // The example clerk declares ./.zuliprc as a credential file.
     expect(out).toContain('./.zuliprc:/app/.zuliprc:ro');
+  });
+});
+
+describe('generateCompose — sidecar services', () => {
+  function recipeWithServices(services: Recipe['services']): WalkResult {
+    return {
+      path: '/tmp/test-recipe.json',
+      recipe: {
+        name: 'Sidecar Test',
+        agent: { systemPrompt: 'x' },
+        services,
+      } as Recipe,
+    };
+  }
+
+  test('omits sidecar block when recipe has no services', () => {
+    // Synthetic recipe with no services field — only the agent service
+    // should appear under the top-level services: key.
+    const walk: WalkResult = {
+      path: '/tmp/no-sidecars.json',
+      recipe: { name: 'No Sidecars', agent: { systemPrompt: 'x' } } as Recipe,
+    };
+    const out = generateCompose({
+      walks: [walk], sources: [], envVars: [], options: defaultOptions(),
+    });
+    expect(out).not.toContain('container_name: mediawiki');
+    expect(out).not.toContain('container_name: mariadb');
+  });
+
+  test('emits one service entry per sidecar', () => {
+    const walk = recipeWithServices([
+      { name: 'mediawiki', image: 'mediawiki:1.42', ports: ['8080:80'], dependsOn: ['mariadb'] },
+      { name: 'mariadb', image: 'mariadb:11', restart: 'unless-stopped' },
+    ]);
+    const out = generateCompose({
+      walks: [walk], sources: [], envVars: [], options: defaultOptions(),
+    });
+    expect(out).toContain('  mediawiki:');
+    expect(out).toContain('    image: mediawiki:1.42');
+    expect(out).toContain('  mariadb:');
+    expect(out).toContain('    image: mariadb:11');
+    // depends_on should be on the consumer (mediawiki), not the provider.
+    expect(out).toMatch(/mediawiki:[\s\S]*?depends_on:[\s\S]*?- mariadb/);
+  });
+
+  test('honors port + environment + volumes + healthcheck on sidecars', () => {
+    const walk = recipeWithServices([
+      {
+        name: 'mediawiki',
+        image: 'mediawiki:1.42',
+        ports: ['${MW_BIND:-127.0.0.1}:8080:80'],
+        environment: { MW_DEBUG: '0' },
+        volumes: [{ source: './wiki-db', target: '/var/lib/mysql' }],
+        healthcheck: { test: ['CMD', 'curl', '-f', 'http://localhost/'], interval: '30s', retries: 3 },
+      },
+    ]);
+    const out = generateCompose({
+      walks: [walk], sources: [], envVars: [], options: defaultOptions(),
+    });
+    expect(out).toContain('"${MW_BIND:-127.0.0.1}:8080:80"');
+    expect(out).toContain('MW_DEBUG: "0"');
+    expect(out).toContain('./wiki-db:/var/lib/mysql');
+    expect(out).toMatch(/test: \["CMD","curl","-f","http:\/\/localhost\/"\]/);
+    expect(out).toContain('interval: 30s');
+    expect(out).toContain('retries: 3');
+  });
+
+  test('top-level secrets block is union of build-time + sidecar secrets', () => {
+    // Build-time secret on a source.
+    const sourceWithAuth: McpSource = {
+      key: 'https://github.com/x/y@main',
+      url: 'https://github.com/x/y.git',
+      ref: 'main',
+      install: { kind: 'npm' },
+      authSecret: 'GITLAB_TOKEN',
+      sslBypass: false,
+      inContainerPath: '/y',
+      refs: [{ recipePath: '/r/a.json', mcpServerName: 'srv' }],
+    };
+    // Sidecar with an additional runtime secret.
+    const walk = recipeWithServices([
+      { name: 'mariadb', image: 'mariadb:11', secrets: ['WIKI_DB_PASSWORD'] },
+    ]);
+    const out = generateCompose({
+      walks: [walk], sources: [sourceWithAuth], envVars: [], options: defaultOptions(),
+    });
+    // Top-level secrets block lists both, sorted.
+    expect(out).toMatch(/secrets:\n\s+GITLAB_TOKEN:\n\s+file: \.\/GITLAB_TOKEN/);
+    expect(out).toMatch(/WIKI_DB_PASSWORD:\n\s+file: \.\/WIKI_DB_PASSWORD/);
+    // Service-level on the sidecar references it.
+    expect(out).toMatch(/mariadb:[\s\S]*?secrets:[\s\S]*?- WIKI_DB_PASSWORD/);
   });
 });

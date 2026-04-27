@@ -26,7 +26,7 @@ import type {
   SourceRef,
   WalkResult,
 } from './types.js';
-import type { RecipeMcpServer, RecipeMcpServerSource } from './vendor/recipe.js';
+import type { RecipeMcpServerSource } from './vendor/recipe.js';
 
 export interface DetectOptions {
   strict: boolean;

@@ -2,7 +2,7 @@ import mri from 'mri';
 import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { log } from './log.js';
 import { slugify } from './slug.js';
 import type {
@@ -28,6 +28,7 @@ import {
   promptForVars,
   promptForCredentialFields,
   resolvePresent,
+  resolveValue,
   type CredentialFileField,
 } from './prompts.js';
 import {
@@ -35,9 +36,9 @@ import {
   hostFilename,
   resolveFieldValue,
   serializeCredentialFile,
-  type CredentialFileSpec,
 } from './credentials.js';
 import { listTemplates, scaffoldRecipe, type TemplateName } from './init.js';
+import { renderTemplate } from './template.js';
 
 const pkg = JSON.parse(
   readFileSync(
@@ -76,6 +77,10 @@ ${log.bold('Flags:')}
   --no-prompts           Non-interactive; warn-and-continue on missing values
   --env-file <path>      Read variable values from this file before prompting
   --pin-refs             Resolve branch refs to current SHAs (Phase 4)
+  --allow-incomplete-templates
+                         Write templated config files even when \${VAR}
+                         references render as empty.  Default: refuse the
+                         build (catches the WIKI_SECRET_KEY-style footgun).
   --help, -h             Show this message
 `;
 
@@ -129,8 +134,13 @@ function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Rec
  *  must be quoted to prevent compose from trying to expand substrings
  *  like `${M5qt58t}` from inside a token.  We use single quotes when
  *  possible (literal — no escapes), and fall back to double quotes with
- *  `\$ \" \\` escapes when the value itself contains a single quote. */
-function escapeEnvValue(value: string): string {
+ *  `\$ \" \\` escapes when the value itself contains a single quote.
+ *
+ *  NB: distinct from `quoteForComposeEnvBlock` (compose.ts) — that one
+ *  formats values for compose YAML's `environment:` block, where compose
+ *  STILL wants to interpolate `${VAR}` (so `$` is left unescaped).
+ *  Different file format, different rules; they do NOT share a core. */
+function escapeForEnvFile(value: string): string {
   // No special chars at all: write bare for readability.
   if (!/[$'"#`\\\s]/.test(value)) return value;
   // Single-quoted: literal everything except `'` itself.
@@ -143,13 +153,35 @@ function escapeEnvValue(value: string): string {
   return `"${escaped}"`;
 }
 
+/** Warn when a templated config file's host mode is more restrictive than
+ *  group/other-readable.  Cook can't help past this point — once docker
+ *  bind-mounts the file (especially as `:ro`), the container can't chown
+ *  it, so the runtime UID inside the container must already match the host
+ *  UID that wrote the file.  Mode 0644 sidesteps the issue.
+ *
+ *  This is a soft warning, not a refusal: operators on Linux/WSL2 with the
+ *  default UID 1000 happen to match `bun`'s UID 1000 in the oven/bun
+ *  image, so 0600 works for them.  CI runners + macOS Docker Desktop +
+ *  rootless docker hit the breakage. */
+function warnIfRestrictiveTemplateMode(mode: number, origin: string): void {
+  // Mode bits 0o044 = group-read + other-read.  If neither is set, only the
+  // owner can read — which inside a container means only the matching UID.
+  if ((mode & 0o044) === 0) {
+    log.warn(
+      `${origin}: mode 0${mode.toString(8)} is owner-only — the container's runtime UID must ` +
+      `match the host UID that wrote this file, or the bind mount will be unreadable. ` +
+      `Mode 0644 avoids the issue (the file lives in your build dir, which is already permission-protected).`,
+    );
+  }
+}
+
 /** Render a `.env` file body from collected key/value pairs.  Sorted by
  *  key for determinism; each line `KEY=value` with a trailing newline.
- *  Values are quoted/escaped per `escapeEnvValue` so compose's
+ *  Values are quoted/escaped per `escapeForEnvFile` so compose's
  *  interpolation doesn't misread `${...}` substrings inside tokens. */
 function renderEnvFile(values: Record<string, string>): string {
   const keys = Object.keys(values).sort();
-  return keys.map((k) => `${k}=${escapeEnvValue(values[k]!)}`).join('\n')
+  return keys.map((k) => `${k}=${escapeForEnvFile(values[k]!)}`).join('\n')
     + (keys.length ? '\n' : '');
 }
 
@@ -163,7 +195,7 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   const flags = mri(argv, {
     // mri auto-handles `--no-<flag>` as `flag: false`; we read it as
     // `flags.prompts === false` below.
-    boolean: ['help', 'strict', 'pin-refs'],
+    boolean: ['help', 'strict', 'pin-refs', 'allow-incomplete-templates'],
     string: ['out', 'env-file', 'image-name'],
     alias: { h: 'help' },
   });
@@ -200,6 +232,29 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     return { exitCode: 2, outDir: '' };
   }
 
+  // Reject `services` / `containerTemplateFiles` on non-parent (child)
+  // recipes.  Cook only reads them from walks[0], so silently dropping
+  // them would deploy a stack missing its sidecars with no warning.
+  // Better to fail-fast and tell the operator to move them up.
+  for (let i = 1; i < walks.length; i++) {
+    const child = walks[i]!;
+    if (child.recipe.services && child.recipe.services.length > 0) {
+      log.error(
+        `child recipe ${child.path} declares services (sidecars), but only the ` +
+        `parent recipe's services are deployed.  Move the services declaration ` +
+        `to the parent recipe (${parentWalk.path}).`,
+      );
+      return { exitCode: 2, outDir: '' };
+    }
+    if (child.recipe.containerTemplateFiles && child.recipe.containerTemplateFiles.length > 0) {
+      log.error(
+        `child recipe ${child.path} declares containerTemplateFiles, but only the ` +
+        `parent recipe's are rendered.  Move them to the parent recipe (${parentWalk.path}).`,
+      );
+      return { exitCode: 2, outDir: '' };
+    }
+  }
+
   const outDir = resolve(flags.out ?? defaultOutDir(parentWalk.recipe));
 
   let sources;
@@ -217,8 +272,14 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     return { exitCode: 2, outDir };
   }
 
-  // Resolve required env values: process.env → --env-file → interactive prompt.
-  const required = deriveRequiredVars(envVars, sources);
+  // Resolve required env values.  Precedence: --env-file > process.env > prompts.
+  // (Single source-of-truth — see prompts.ts::resolveValue.)
+  // Sidecar runtime secrets get folded into the same prompt list so the
+  // operator gets ONE coherent UX rather than discovering them via warns.
+  const sidecarSecretNames = Array.from(new Set(
+    (parentWalk.recipe.services ?? []).flatMap((svc) => svc.secrets ?? []),
+  ));
+  const required = deriveRequiredVars(envVars, sources, sidecarSecretNames);
   let envFileValues: Record<string, string> = {};
   if (flags['env-file']) {
     try {
@@ -365,7 +426,135 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     );
   }
 
-  const fileCount = 5 + recipesOut.length + (writeEnvFile ? 1 : 0) + credFilesToWrite.length + authSecretFiles.length;
+  // Sidecar runtime secrets.  Sidecars are now folded into the prompt
+  // pipeline (see `sidecarSecretNames` above + deriveRequiredVars), so by
+  // this point any value the operator was going to supply is already in
+  // collectedValues.  Just enumerate, resolve via the shared helper, and
+  // collect file-write entries.
+  const sidecars = parentWalk.recipe.services ?? [];
+  const sidecarSecretFiles: Array<{ name: string; value: string }> = [];
+  const seenSidecarSecretNames = new Set<string>(seenAuthSecrets);
+  const missingSidecarSecrets: string[] = [];
+  for (const svc of sidecars) {
+    for (const secName of svc.secrets ?? []) {
+      if (seenSidecarSecretNames.has(secName)) continue;
+      seenSidecarSecretNames.add(secName);
+      const value = resolveValue(secName, {
+        envFileValues,
+        promptedValues: collectedValues,
+      });
+      if (value !== undefined) {
+        sidecarSecretFiles.push({ name: secName, value });
+      } else {
+        missingSidecarSecrets.push(secName);
+      }
+    }
+  }
+  for (const name of missingSidecarSecrets) {
+    log.warn(
+      `sidecar secret ${name}: no value supplied — file skipped (operator must hand-place \`${outDir}/${name}\` mode 0600 before \`docker compose up\`)`,
+    );
+  }
+
+  // Templated config files (sidecar `templateFiles[]` + top-level
+  // `containerTemplateFiles[]`).  Same value-bag as everything else, same
+  // precedence (env-file > process.env > prompts) via resolveValue.
+  // Anything still missing renders as empty string + warn — and if the
+  // resulting template is missing values, we refuse the write rather than
+  // emit a half-broken security-critical config (e.g. empty $wgSecretKey).
+  interface RenderedTemplate {
+    path: string;
+    content: string;
+    mode: number;
+    /** Names of vars referenced by the template that had no value. */
+    missing: string[];
+    /** Where this came from — for the warning text. */
+    origin: string;
+  }
+  const renderedTemplates: RenderedTemplate[] = [];
+  // Build the lookup bag once, deterministically — the same precedence
+  // resolveValue would apply if asked per-name.  Used because template
+  // rendering walks ALL `${VAR}` matches in the body, not a known list.
+  const valueBag: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && v !== '') valueBag[k] = v;
+  }
+  for (const [k, v] of Object.entries(envFileValues)) {
+    if (v !== '') valueBag[k] = v;  // env-file overrides process.env
+  }
+  for (const [k, v] of Object.entries(collectedValues)) {
+    if (v !== '' && valueBag[k] === undefined) valueBag[k] = v;  // prompts only fill gaps
+  }
+  for (const svc of sidecars) {
+    for (const tf of svc.templateFiles ?? []) {
+      const { rendered, missing } = renderTemplate(tf.template, valueBag);
+      const mode = tf.mode ? parseInt(tf.mode, 8) : 0o644;
+      warnIfRestrictiveTemplateMode(mode, `services[${svc.name}].templateFiles[${tf.path}]`);
+      renderedTemplates.push({
+        path: tf.path,
+        content: rendered,
+        mode,
+        missing,
+        origin: `services[${svc.name}].templateFiles[${tf.path}]`,
+      });
+    }
+  }
+
+  // Top-level containerTemplateFiles — generated config files cook
+  // bind-mounts into the agent container.  Same render path; compose
+  // generator emits the bind volume.  Named distinctly from per-sidecar
+  // `templateFiles` (which uses `path`-only shape).
+  const containerTemplateFiles = parentWalk.recipe.containerTemplateFiles ?? [];
+  for (const tf of containerTemplateFiles) {
+    const { rendered, missing } = renderTemplate(tf.template, valueBag);
+    const mode = tf.mode ? parseInt(tf.mode, 8) : 0o644;
+    warnIfRestrictiveTemplateMode(mode, `containerTemplateFiles[${tf.hostPath}]`);
+    renderedTemplates.push({
+      path: tf.hostPath,
+      content: rendered,
+      mode,
+      missing,
+      origin: `containerTemplateFiles[${tf.hostPath} → ${tf.inContainer}]`,
+    });
+  }
+
+  // Refuse to write incomplete templates by default.  Operators can
+  // override with --allow-incomplete-templates if they actually want a
+  // template with empty `${VAR}` substitutions (rare; useful for
+  // bootstrapping or debugging).  This catches the security-critical
+  // case where `${WIKI_SECRET_KEY}` would render as empty and produce
+  // a MediaWiki with a predictable secret key.
+  const incompleteTemplates = renderedTemplates.filter((t) => t.missing.length > 0);
+  if (incompleteTemplates.length > 0 && !flags['allow-incomplete-templates']) {
+    log.error(
+      `${incompleteTemplates.length} template${incompleteTemplates.length === 1 ? '' : 's'} ` +
+      `would render with EMPTY values for required variables — this is almost certainly insecure ` +
+      `(e.g. an empty MediaWiki secret key produces predictable CSRF tokens).  Refusing to write.`,
+    );
+    for (const t of incompleteTemplates) {
+      log.error(`    ${t.origin}: missing ${t.missing.join(', ')}`);
+    }
+    log.error(
+      `Either set the missing values (process.env, --env-file, or interactive prompt) ` +
+      `or pass --allow-incomplete-templates to write them anyway.`,
+    );
+    return { exitCode: 2, outDir };
+  }
+  // Even when allowed, surface a clear warning per affected template.
+  for (const t of incompleteTemplates) {
+    log.warn(
+      `${t.origin}: WROTE INSECURE — ${t.missing.length} variable${t.missing.length === 1 ? '' : 's'} ` +
+      `unset, rendered as empty: ${t.missing.join(', ')}`,
+    );
+  }
+
+  const fileCount = 5
+    + recipesOut.length
+    + (writeEnvFile ? 1 : 0)
+    + credFilesToWrite.length
+    + authSecretFiles.length
+    + sidecarSecretFiles.length
+    + renderedTemplates.length;
 
   // Confirm-before-write gate.  Skipped in --no-prompts mode (the operator
   // told us to be non-interactive; bombing into a confirm prompt would
@@ -399,6 +588,26 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
       // BuildKit reads the file content verbatim as the secret value —
       // no quoting, no trailing newline (some tools care).
       writeFileSync(join(outDir, sec.name), sec.value, { mode: 0o600 });
+    }
+    for (const sec of sidecarSecretFiles) {
+      // Same file shape as build-time secrets; docker secrets reads
+      // the file content as the secret value.
+      writeFileSync(join(outDir, sec.name), sec.value, { mode: 0o600 });
+    }
+    for (const tf of renderedTemplates) {
+      const fullPath = join(outDir, tf.path);
+      // Defense-in-depth: validator already rejects paths with `..` /
+      // leading `/`, but a future change could regress.  Verify the
+      // resolved path stays inside outDir before writing.
+      const resolvedFull = resolve(fullPath);
+      const resolvedOut = resolve(outDir);
+      if (resolvedFull !== resolvedOut && !resolvedFull.startsWith(resolvedOut + sep)) {
+        throw new Error(
+          `templateFile path "${tf.path}" resolves outside outDir (${resolvedFull} vs ${resolvedOut}) — refusing to write`,
+        );
+      }
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, tf.content, { mode: tf.mode });
     }
     for (const { filename, content } of recipesOut) {
       writeFileSync(join(outDir, 'recipes', filename), content);

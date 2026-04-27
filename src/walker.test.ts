@@ -13,27 +13,25 @@ const examplesRoot = resolve(
 );
 
 describe('walkRecipe', () => {
-  test('walks the triumvirate parent + 3 fleet children in order', async () => {
+  test('walks the triumvirate parent + 4 fleet children in order', async () => {
     const parent = join(examplesRoot, 'triumvirate.json');
     const results = await walkRecipe(parent);
 
-    expect(results).toHaveLength(4);
+    expect(results).toHaveLength(5);  // parent + miner + reviewer + clerk + encyclopedist
 
-    // Parent first.
     expect(results[0]?.path).toBe(parent);
     expect(results[0]?.recipe.name).toBe('Knowledge Mining Triumvirate');
 
-    // Children resolved against the parent's directory, in declaration order.
     expect(results[1]?.path).toBe(join(examplesRoot, 'knowledge-miner.json'));
     expect(results[1]?.recipe.name).toBe(
       'Knowledge Miner (generic Triumvirate example)',
     );
-
     expect(results[2]?.path).toBe(join(examplesRoot, 'knowledge-reviewer.json'));
     expect(results[2]?.recipe.name).toBe('Knowledge Reviewer');
-
     expect(results[3]?.path).toBe(join(examplesRoot, 'clerk.json'));
     expect(results[3]?.recipe.name).toBe('Library Frontdesk');
+    expect(results[4]?.path).toBe(join(examplesRoot, 'encyclopedist.json'));
+    expect(results[4]?.recipe.name).toBe('Knowledge Encyclopedist');
   });
 
   test('walks a leaf recipe and returns a single entry', async () => {

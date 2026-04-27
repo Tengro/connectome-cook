@@ -61,7 +61,7 @@ describe('generateReadme — triumvirate fixture', () => {
 
     // Description from the parent recipe.
     expect(out).toContain(
-      'Conductor that supervises miner + reviewer + clerk child processes',
+      'Conductor that supervises miner + reviewer + clerk + encyclopedist',
     );
 
     // What's in the image — connectome-host + tini + bun + node baseline.

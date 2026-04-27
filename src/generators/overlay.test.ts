@@ -21,7 +21,6 @@ import { detectSources } from '../source-detector.js';
 import { collectEnvVars } from '../env-collector.js';
 import type {
   BuildOptions,
-  GeneratorInput,
   McpSource,
   WalkResult,
 } from '../types.js';

@@ -24,8 +24,13 @@ export interface RequiredVar {
   name: string;
   /** Where the value will be used — shown in the prompt. */
   consumer: string;
-  /** Build-time secret (passed via --secret) vs runtime env var (.env). */
-  scope: 'runtime' | 'build-secret';
+  /** What the value is for, in cook's pipeline:
+   *   - 'runtime'         — recipe ${VAR}, ends up in .env, read by the agent
+   *   - 'build-secret'    — mcpServers[*].source.authSecret, mounted via
+   *                         BuildKit at clone-time
+   *   - 'sidecar-secret'  — services[*].secrets[*], file at <outDir>/<NAME>
+   *                         that compose mounts as a runtime secret */
+  scope: 'runtime' | 'build-secret' | 'sidecar-secret';
   /** Optional placeholder shown as the default-but-don't-use suggestion. */
   placeholder?: string;
   /** When set, the recipe references this var as `${VAR:-default}` —
@@ -41,8 +46,24 @@ export interface PromptResult {
   cancelled: boolean;
 }
 
-/** Build the list of variables that need a value, deduped by name. */
-export function deriveRequiredVars(envVars: EnvVar[], sources: McpSource[]): RequiredVar[] {
+/** Build the list of variables that need a value, deduped by name.
+ *  Includes:
+ *    - ANTHROPIC_API_KEY (always; membrane reads from process.env)
+ *    - every envVar (recipe `${VAR}`)
+ *    - every authSecret across sources (clone-time)
+ *    - every sidecar service's secrets[] entries (runtime, written by cook
+ *      to <outDir>/<NAME> for compose to bind into the sidecar)
+ *
+ *  Dedup keeps the first occurrence — runtime vars take precedence over
+ *  build-secrets which take precedence over sidecar-secrets when names
+ *  collide.  Cook's value-write paths still land the resolved value in
+ *  every place it's needed (build-time secret file + .env), so the same
+ *  operator-supplied value reaches each consumer. */
+export function deriveRequiredVars(
+  envVars: EnvVar[],
+  sources: McpSource[],
+  sidecarSecretNames: string[] = [],
+): RequiredVar[] {
   const out: RequiredVar[] = [
     {
       name: 'ANTHROPIC_API_KEY',
@@ -73,6 +94,14 @@ export function deriveRequiredVars(envVars: EnvVar[], sources: McpSource[]): Req
       consumer: `${src.url || src.key} (clone secret)`,
       scope: 'build-secret',
       placeholder: placeholderFor(src.authSecret),
+    });
+  }
+  for (const name of sidecarSecretNames) {
+    out.push({
+      name,
+      consumer: `sidecar runtime secret`,
+      scope: 'sidecar-secret',
+      placeholder: placeholderFor(name),
     });
   }
   // Dedupe by name (envVar may collide with a runtime var declared by us).
@@ -115,8 +144,38 @@ export function loadEnvFile(path: string): Record<string, string> {
   return out;
 }
 
-/** Resolve every required var by checking process.env first, then envFile.
- *  Returns the values found and the names still missing. */
+/** Single source-of-truth precedence for resolving a variable's value.
+ *  Order: --env-file > process.env > prompted/collected.  Used everywhere
+ *  cook needs to look up a value (env-collector flow, sidecar secret
+ *  files, container template rendering) so the same operator-supplied
+ *  value lands in every artifact.  An empty string is treated as unset
+ *  (operators occasionally `export FOO=` to clear a value).
+ *
+ *  Why envFile > processEnv: --env-file is the explicit "use these values
+ *  for THIS cook run" intent; ambient process env is incidental.  When
+ *  the operator says both, the explicit one wins. */
+export function resolveValue(
+  name: string,
+  sources: {
+    envFileValues?: Record<string, string>;
+    processEnv?: NodeJS.ProcessEnv;
+    promptedValues?: Record<string, string>;
+  },
+): string | undefined {
+  const fromFile = sources.envFileValues?.[name];
+  if (fromFile !== undefined && fromFile !== '') return fromFile;
+  const fromEnv = (sources.processEnv ?? process.env)[name];
+  if (fromEnv !== undefined && fromEnv !== '') return fromEnv;
+  const fromPrompt = sources.promptedValues?.[name];
+  if (fromPrompt !== undefined && fromPrompt !== '') return fromPrompt;
+  return undefined;
+}
+
+/** Resolve every required var via `resolveValue`.  Returns the values
+ *  found and the names still missing.  Note: prompted values aren't in
+ *  scope yet at this stage — only env-file + process.env are checked.
+ *  After prompting, the caller merges prompted values into the bag and
+ *  calls resolveValue per-name for any later lookup. */
 export function resolvePresent(
   required: RequiredVar[],
   envFileValues: Record<string, string>,
@@ -124,12 +183,9 @@ export function resolvePresent(
   const found: Record<string, string> = {};
   const missing: RequiredVar[] = [];
   for (const v of required) {
-    const fromEnv = process.env[v.name];
-    const fromFile = envFileValues[v.name];
-    if (fromEnv !== undefined && fromEnv !== '') {
-      found[v.name] = fromEnv;
-    } else if (fromFile !== undefined && fromFile !== '') {
-      found[v.name] = fromFile;
+    const value = resolveValue(v.name, { envFileValues });
+    if (value !== undefined) {
+      found[v.name] = value;
     } else {
       missing.push(v);
     }

@@ -27,7 +27,12 @@ beforeAll(() => {
   // Run cook build via the same bun process that's running the tests.
   const result = spawnSync(
     'bun',
-    [join(REPO_ROOT, 'bin/cook'), 'build', EXAMPLE_RECIPE, '--out', outDir, '--no-prompts'],
+    // --allow-incomplete-templates: under --no-prompts no operator can
+     // supply WIKI_SECRET_KEY etc., and the secure default refuses to
+     // render templates with empty required vars.  We're verifying the
+     // build mechanics, not secret hygiene; opt out of the refusal so the
+     // artifacts get written and we can assert their shape.
+    [join(REPO_ROOT, 'bin/cook'), 'build', EXAMPLE_RECIPE, '--out', outDir, '--no-prompts', '--allow-incomplete-templates'],
     { encoding: 'utf-8', cwd: REPO_ROOT },
   );
   if (result.status !== 0) {
@@ -85,11 +90,14 @@ describe('cook build against the Triumvirate example', () => {
       expect(parsed.services).toBeDefined();
       const services = parsed.services as Record<string, Record<string, unknown>>;
       const serviceKeys = Object.keys(services);
-      expect(serviceKeys).toHaveLength(1);
-      const service = services[serviceKeys[0]!]!;
-      expect(service.stdin_open).toBe(true);
-      expect(service.tty).toBe(true);
-      expect(service.image).toMatch(/knowledge-mining-triumvirate/);
+      // Agent + 2 sidecars (mediawiki + mariadb) from the example's services declaration.
+      expect(serviceKeys).toContain('knowledge-mining-triumvirate');
+      expect(serviceKeys).toContain('mediawiki');
+      expect(serviceKeys).toContain('mariadb');
+      const agent = services['knowledge-mining-triumvirate']!;
+      expect(agent.stdin_open).toBe(true);
+      expect(agent.tty).toBe(true);
+      expect(agent.image).toMatch(/knowledge-mining-triumvirate/);
     } else {
       // Fallback: structural regex checks.
       expect(composeText).toMatch(/services:/);
@@ -100,12 +108,13 @@ describe('cook build against the Triumvirate example', () => {
 
   test('every generated recipe re-loads through walker', async () => {
     const walks = await walkRecipe(join(outDir, 'recipes/triumvirate.json'));
-    expect(walks).toHaveLength(4);
+    expect(walks).toHaveLength(5);  // parent + miner + reviewer + clerk + encyclopedist
     const names = walks.map((w) => w.recipe.name);
     expect(names).toContain('Knowledge Mining Triumvirate');
     expect(names).toContain('Knowledge Miner (generic Triumvirate example)');
     expect(names).toContain('Knowledge Reviewer');
     expect(names).toContain('Library Frontdesk');
+    expect(names).toContain('Knowledge Encyclopedist');
   });
 
   test('.env.example lists ANTHROPIC_API_KEY + recipe vars', () => {
