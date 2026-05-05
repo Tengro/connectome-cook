@@ -26,6 +26,7 @@
         "ZULIP_RC_PATH": "./.zuliprc",
         "ZULIP_SUBSCRIBE": "${ZULIP_CHANNEL}"
       },
+      "channelSubscription": ["zulip:${ZULIP_CHANNEL}"],
       "source": {
         "url": "https://github.com/antra-tess/zulip_mcp.git",
         "install": "npm"
