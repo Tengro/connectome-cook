@@ -94,6 +94,7 @@ export function generateDockerfile(input: GeneratorInput): string {
   const needsPython = builderSources.some(
     (s) => runtimeForSource(s) === 'python3',
   );
+  const needsWebUiBundle = anyRecipeUsesWebUi(walks);
   const persistentDirs = collectWorkspaceMountPaths(walks);
   const hasAnySecret = sources.some((s) => s.authSecret);
   const imageName = options.imageName ?? deriveImageName(parent.recipe);
@@ -126,6 +127,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     persistentDirs,
     needsNode,
     needsPython,
+    needsWebUiBundle,
     parentRecipeBasename,
   }));
 
@@ -249,6 +251,7 @@ interface RuntimeStageArgs {
   persistentDirs: string[];
   needsNode: boolean;
   needsPython: boolean;
+  needsWebUiBundle: boolean;
   parentRecipeBasename: string;
 }
 
@@ -260,6 +263,7 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
     persistentDirs,
     needsNode,
     needsPython,
+    needsWebUiBundle,
     parentRecipeBasename,
   } = args;
 
@@ -313,6 +317,14 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   lines.push('COPY --from=ch-deps /app/node_modules ./node_modules');
   lines.push('COPY --from=ch-deps /app/package.json /app/bun.lock /app/tsconfig.json ./');
   lines.push('COPY --from=ch-deps /app/src ./src');
+  if (needsWebUiBundle) {
+    // connectome-host's postinstall builds the WebUI SPA into /app/dist when
+    // the `web/` directory is present in the source tree. The WebUiModule
+    // serves it from <package>/dist/web; without this COPY the runtime image
+    // 404s on every static asset request.
+    lines.push('# Built WebUI SPA bundle (postinstall builds it from connectome-host/web/).');
+    lines.push('COPY --from=ch-deps /app/dist ./dist');
+  }
   lines.push('');
 
   // recipes/ — cook writes the resolved tree to <outDir>/recipes/.
@@ -423,6 +435,18 @@ function anyRecipeUsesNodeCommand(walks: WalkResult[]): boolean {
     for (const server of Object.values(servers) as RecipeMcpServer[]) {
       if (server.command && NODE_COMMANDS.has(server.command)) return true;
     }
+  }
+  return false;
+}
+
+/** True if any walked recipe enables the WebUI module — either via
+ *  `modules.webui: true` or `modules.webui: { ... }`. Drives whether we
+ *  copy the built SPA bundle (`dist/`) into the runtime image. */
+function anyRecipeUsesWebUi(walks: WalkResult[]): boolean {
+  for (const walk of walks) {
+    const webui = walk.recipe.modules?.webui;
+    if (webui === undefined || webui === false) continue;
+    return true;
   }
   return false;
 }

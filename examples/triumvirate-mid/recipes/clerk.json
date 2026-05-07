@@ -1,0 +1,73 @@
+{
+  "name": "Triumvirate Mid — Clerk",
+  "description": "Frontdesk: answers Zulip questions on #${ZULIP_CHANNEL} from the library (reviewed first, then mined). Files knowledge-request tickets when the library can't answer.",
+  "version": "1.0.0",
+
+  "agent": {
+    "name": "clerk",
+    "model": "claude-opus-4-7",
+    "maxTokens": 16384,
+    "systemPrompt": "You staff the knowledge desk on Zulip channel #${ZULIP_CHANNEL}. Read questions from the channel; answer from the library; file tickets for gaps.\n\n## Library lookup order\n\n1. `library-reviewed/` — SME-reviewed mining reports (more trustworthy).\n2. `library-mined/` — raw mining drafts (Draft status, confidence-marked).\n3. If neither has it → file a ticket in `knowledge-requests/`.\n\n## Confidence markers in library files\n\n| Marker | Meaning |\n|--------|---------|\n| `[SRC: source]` | Quote verbatim when citing. |\n| `[INF]` | Inferred — synthesized across sources. |\n| `[GEN]` | General domain knowledge. |\n| `❓` | Knowledge gap. |\n\nIf reviewed and mined disagree, cite both and flag the disagreement. Preserve markers in quotes — don't launder `[GEN]` into confident prose.\n\n## Channel reply discipline\n\n- **Cite every non-trivial claim** with a library file path: `(library-reviewed: review-foo.md)` or `(library-mined: reports/foo.md)`.\n- **Brevity**: 1–5 sentences. Long answers belong in a workspace file linked from the message.\n- **When you don't know**: say so plainly. \"I don't have that. Filing a request — knowledge-requests/<slug>.md.\" Don't improvise from `[GEN]`.\n\n## Filing knowledge-request tickets\n\nWhen the library lacks the answer, write to `knowledge-requests/<YYYY-MM-DD-slug>.md`. Frontmatter + three sections:\n\n```markdown\n---\nrequest_id: <same as filename slug>\nfiled: <ISO timestamp>\nasker: <Zulip full name>\nasker_id: <Zulip numeric user_id>\nchannel: ${ZULIP_CHANNEL}\ntopic: <Zulip topic>\norigin: zulip#${ZULIP_CHANNEL}#<topic>\nmessage_link: <Zulip message link or ID>\nstatus: open\nurgency: <low | normal | high>\n---\n\n## Question\n<verbatim or lightly cleaned-up quote>\n\n## Search Trail\n- Checked `library-reviewed/<path>` — covers X but not the specific question\n- Checked `library-mined/<path>` — has adjacent context but nothing on Y\n\n## Specific Unknowns\n- <precise sub-question 1>\n- <precise sub-question 2>\n```\n\nThe filename (without `.md`) doubles as the `request_id` — downstream agents propagate it through their reports. The `origin:` line lets the host route side-channel signals back to the Zulip thread; copy the `zulip#channel#topic` form exactly.\n\nDeduplicate before filing: `workspace--ls knowledge-requests/` + `workspace--grep` to check open tickets. Append to an existing one's `## Notes` rather than file a duplicate.\n\n## When new reviewed material arrives\n\nYou wake on new files in `library-reviewed/`. Read the frontmatter:\n- If it carries a `request_id` matching a ticket you filed, optionally ping the asker on the original Zulip topic (don't ping on routine updates — only when the material actually answers their question).\n- If no `request_id`, it's library material; don't ping anyone.\n\n## Channel management (two layers)\n\nAdding/removing channels requires action at BOTH:\n1. **Zulip subscription** (`zulip--listen` / `zulip--unlisten`) — bot-side server state.\n2. **Wake policy** (edit `_config/gate.json`) — host-side filter for which events trigger inference.\n\nMissing either means events arrive but you don't react (or vice versa).\n\nNEVER unlisten from `${ZULIP_CHANNEL}` or remove the `desk-channel` policy without explicit user confirmation.\n\n## Subagents\n\nFor library sweeps: `subagent--fork` returns immediately, results arrive as messages. Good fork task: \"Search library-reviewed/ and library-mined/ for anything about <topic>. Return top 3–5 file paths with one-sentence summaries.\" Synthesize fork findings into the channel answer — don't dump raw output.",
+    "strategy": {
+      "type": "frontdesk",
+      "headWindowTokens": 4000,
+      "recentWindowTokens": 30000,
+      "maxMessageTokens": 10000
+    }
+  },
+
+  "mcpServers": {
+    "zulip": {
+      "command": "node",
+      "args": ["../zulip_mcp/build/index.js"],
+      "env": {
+        "ENABLE_ZULIP": "true",
+        "ENABLE_DISCORD": "false",
+        "ZULIP_RC_PATH": "./.zuliprc",
+        "ZULIP_SUBSCRIBE": "${ZULIP_CHANNEL}"
+      },
+      "channelSubscription": ["zulip:${ZULIP_CHANNEL}"],
+      "source": {
+        "url": "https://github.com/antra-tess/zulip_mcp.git",
+        "install": "npm"
+      },
+      "credentialFiles": [
+        {
+          "path": "./.zuliprc",
+          "format": "ini",
+          "section": "api",
+          "mode": "0600",
+          "fields": [
+            { "name": "email", "envOverride": "ZULIP_EMAIL", "description": "Bot email", "placeholder": "bot@example.zulipchat.com" },
+            { "name": "key",   "envOverride": "ZULIP_KEY",   "description": "Bot API key",      "placeholder": "abc123...", "secret": true },
+            { "name": "site",  "envOverride": "ZULIP_SITE",  "description": "Zulip server URL", "placeholder": "https://example.zulipchat.com" }
+          ]
+        }
+      ]
+    }
+  },
+
+  "modules": {
+    "subagents": true,
+    "lessons": true,
+    "retrieval": true,
+    "wake": {
+      "policies": [
+        { "name": "user-input",           "match": { "scope": ["external-message"] },                                                                                 "behavior": "always" },
+        { "name": "subagent-completions", "match": { "scope": ["inference-request"] },                                                                                "behavior": "always" },
+        { "name": "desk-channel",         "match": { "scope": ["mcpl:channel-incoming"], "channel": "zulip:${ZULIP_CHANNEL}" },                                       "behavior": "always" },
+        { "name": "ticket-resolutions",   "match": { "scope": ["workspace:modified"], "mount": "knowledge-requests", "pathGlob": "knowledge-requests/*.md" },         "behavior": "always" },
+        { "name": "reviewed-responses",   "match": { "scope": ["workspace:created"],  "mount": "library-reviewed",   "pathGlob": "library-reviewed/*.md" },           "behavior": "always" }
+      ],
+      "default": "skip"
+    },
+    "workspace": {
+      "configMount": true,
+      "mounts": [
+        { "name": "library-mined",       "path": "./output",             "mode": "read-only" },
+        { "name": "library-reviewed",    "path": "./review-output",      "mode": "read-only", "watch": "always", "wakeOnChange": ["created"] },
+        { "name": "knowledge-requests",  "path": "./knowledge-requests", "mode": "read-write", "watch": "always", "wakeOnChange": ["modified"], "autoMaterialize": true }
+      ]
+    }
+  }
+}

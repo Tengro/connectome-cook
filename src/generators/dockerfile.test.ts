@@ -189,6 +189,76 @@ describe('generateDockerfile — sibling-copy source', () => {
   });
 });
 
+describe('generateDockerfile — webui module gates dist/ COPY', () => {
+  test('does not emit dist/ COPY when no recipe enables webui', () => {
+    const recipe: Recipe = {
+      name: 'no-webui',
+      agent: { systemPrompt: 'p' },
+      modules: { fleet: true },
+    } as Recipe;
+    const dockerfile = generateDockerfile({
+      walks: [{ path: '/r/p.json', recipe }],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    expect(dockerfile).not.toContain('COPY --from=ch-deps /app/dist ./dist');
+  });
+
+  test('emits dist/ COPY when modules.webui: true', () => {
+    const recipe: Recipe = {
+      name: 'webui-true',
+      agent: { systemPrompt: 'p' },
+      modules: { webui: true },
+    } as Recipe;
+    const dockerfile = generateDockerfile({
+      walks: [{ path: '/r/p.json', recipe }],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    expect(dockerfile).toContain('COPY --from=ch-deps /app/dist ./dist');
+  });
+
+  test('emits dist/ COPY when modules.webui is an object', () => {
+    const recipe: Recipe = {
+      name: 'webui-obj',
+      agent: { systemPrompt: 'p' },
+      modules: { webui: { port: 7340, basicAuth: { username: 'a', password: 'b' } } },
+    } as Recipe;
+    const dockerfile = generateDockerfile({
+      walks: [{ path: '/r/p.json', recipe }],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    expect(dockerfile).toContain('COPY --from=ch-deps /app/dist ./dist');
+  });
+
+  test('detects webui declared on a fleet child (not just the parent)', () => {
+    const parent: Recipe = {
+      name: 'parent',
+      agent: { systemPrompt: 'p' },
+      modules: { fleet: { children: [{ name: 'c', recipe: './child.json' }] } },
+    } as Recipe;
+    const child: Recipe = {
+      name: 'child',
+      agent: { systemPrompt: 'c' },
+      modules: { webui: true },
+    } as Recipe;
+    const dockerfile = generateDockerfile({
+      walks: [
+        { path: '/r/parent.json', recipe: parent },
+        { path: '/r/child.json', recipe: child },
+      ],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    expect(dockerfile).toContain('COPY --from=ch-deps /app/dist ./dist');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
