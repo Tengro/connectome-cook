@@ -143,6 +143,12 @@ export interface RecipeModules {
    * dataDir) stay CWD-relative.
    */
   fleet?: boolean | RecipeFleet;
+  /**
+   * Web admin UI module. Cook only needs to know whether it's enabled — the
+   * runtime image must include the built SPA bundle (dist/) when so. The
+   * full shape lives upstream; we keep it permissive here.
+   */
+  webui?: boolean | Record<string, unknown>;
 }
 
 export interface RecipeFleet {
