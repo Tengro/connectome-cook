@@ -2,10 +2,12 @@
  * Per-install-pattern Dockerfile fragment generators.
  *
  * Each runtime module exports `installSteps(source)` returning the RUN
- * block(s) (clone + build) that go inside a builder stage.  The dockerfile
- * generator (Phase 2) wraps these with `FROM <baseImage> AS <stage>` and
- * `WORKDIR /build`, and adds the matching `COPY --from=<stage>` to the
- * runtime stage.
+ * block(s) (clone + build) that go inside a builder stage.  Each runtime
+ * clones + builds AT `source.inContainerPath` (i.e. at the same absolute
+ * path the runtime stage will COPY the result to), so installers that
+ * bake absolute paths into their output — pip's entry-point shebangs are
+ * the canonical example — write them with paths that remain valid after
+ * the cross-stage COPY.  See DESIGN-NOTES.md "venv portability lies".
  */
 
 import type { InstallPattern, McpSource } from '../types.js';
@@ -16,9 +18,9 @@ import * as custom from './custom.js';
 export interface RuntimeModule {
   /** Default base image for the builder stage.  Operator may override. */
   baseImage: string;
-  /** RUN block(s) for clone + install of one source.  Multi-line OK; the
-   *  generator splices the result directly into a `FROM <baseImage> AS <stage>`
-   *  block after `WORKDIR /build`. */
+  /** RUN block(s) for clone + install of one source at `source.inContainerPath`.
+   *  Multi-line OK; the generator splices the result directly into a
+   *  `FROM <baseImage> AS <stage>` block. */
   installSteps(source: McpSource): string;
 }
 
@@ -43,6 +45,10 @@ export function repoBasename(url: string): string {
 }
 
 /** Assemble `git clone` honoring sslBypass and authSecret.
+ *  Clones into `target` (an explicit absolute path) — the runtime modules
+ *  pass `source.inContainerPath` so the clone lands at the same absolute
+ *  path the runtime stage will COPY out, which is what keeps pip-written
+ *  shebangs valid across the cross-stage COPY.
  *  When `authSecret` is set, the URL embeds an `oauth2:$(cat /run/secrets/NAME)`
  *  userinfo segment — the secret is read INLINE from the BuildKit-mounted
  *  file, never lands in the process environment, and the caller is
@@ -50,13 +56,13 @@ export function repoBasename(url: string): string {
  *  RUN line.  We deliberately use `$(cat ...)` rather than the `env=`
  *  option (which needs docker/dockerfile:1.10+) so this works with any
  *  BuildKit that supports the basic secret mount. */
-export function gitCloneCommand(source: McpSource): string {
+export function gitCloneCommand(source: McpSource, target: string): string {
   const sslArg = source.sslBypass ? '-c http.sslVerify=false ' : '';
   if (source.authSecret) {
     const stripped = source.url.replace(/^https?:\/\//, '');
-    return `git ${sslArg}clone "https://oauth2:$(cat /run/secrets/${source.authSecret})@${stripped}"`;
+    return `git ${sslArg}clone "https://oauth2:$(cat /run/secrets/${source.authSecret})@${stripped}" ${target}`;
   }
-  return `git ${sslArg}clone ${source.url}`;
+  return `git ${sslArg}clone ${source.url} ${target}`;
 }
 
 /** Optional `&& cd <dir> && git checkout <ref>` tail.  Empty when ref is

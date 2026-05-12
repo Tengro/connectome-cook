@@ -75,8 +75,10 @@ describe('generateDockerfile — triumvirate fixture', () => {
     expect(dockerfile).toContain('ARG CH_REPO_URL=');
     expect(dockerfile).toContain('bun install --frozen-lockfile');
 
-    // Runtime stage COPY for zulip into /zulip_mcp.
-    expect(dockerfile).toContain('COPY --from=zulip-mcp-build /build/zulip_mcp /zulip_mcp');
+    // Runtime stage COPY for zulip into /zulip_mcp.  Source and target are
+    // the same path because each builder stage now builds at inContainerPath
+    // (see DESIGN-NOTES.md "venv portability lies").
+    expect(dockerfile).toContain('COPY --from=zulip-mcp-build /zulip_mcp /zulip_mcp');
 
     // Required runtime-stage primitives.  Cook's entrypoint runs as root,
     // chowns bind targets, and exec-drops to bun via gosu — no USER directive.
@@ -142,8 +144,15 @@ describe('generateDockerfile — pip-editable source', () => {
     expect(dockerfile).toContain('python3 -m venv .venv');
     expect(dockerfile).toContain('.venv/bin/pip install --no-cache-dir -e .');
 
-    // And a COPY into /python-thing in the runtime stage.
-    expect(dockerfile).toContain('/build/python-thing /python-thing');
+    // The builder must clone + cd at the runtime path so pip writes
+    // entry-point shebangs that survive the cross-stage COPY.
+    expect(dockerfile).toContain('git clone https://example.com/python-thing.git /python-thing');
+    expect(dockerfile).toContain('cd /python-thing');
+    expect(dockerfile).not.toContain('WORKDIR /build');
+
+    // Runtime COPY is same-path → same-path; no /build/ prefix on either side.
+    expect(dockerfile).toMatch(/COPY --from=\S+ \/python-thing \/python-thing/);
+    expect(dockerfile).not.toContain('/build/python-thing');
   });
 });
 
