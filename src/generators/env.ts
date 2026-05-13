@@ -234,10 +234,20 @@ export function generateEnv(input: GeneratorInput): string {
   lines.push('# startup and exposes the values to the agents.');
   lines.push('');
 
+  // Exclude `runtimeVars` declared on containerTemplateFiles — those are
+  // filled at container start by the conhost entrypoint (from a bootstrap
+  // sidecar's output, etc.) and don't belong in the operator's .env.
+  const parent = input.walks[0];
+  const runtimeOnly = new Set<string>(
+    (parent?.recipe.containerTemplateFiles ?? [])
+      .flatMap((tf) => tf.runtimeVars ?? []),
+  );
+  const operatorEnvVars = input.envVars.filter((v) => !runtimeOnly.has(v.name));
+
   // Sections, in order.
-  lines.push(...buildRequiredSection(input.envVars));
+  lines.push(...buildRequiredSection(operatorEnvVars));
   lines.push(...buildBuildTimeSecretsSection(input.sources));
-  lines.push(...buildOptionalSection(input.envVars));
+  lines.push(...buildOptionalSection(operatorEnvVars));
   lines.push(...buildNotesSection(input));
 
   // Collapse any trailing blank lines into a single trailing newline.

@@ -95,6 +95,9 @@ export function generateDockerfile(input: GeneratorInput): string {
     (s) => runtimeForSource(s) === 'python3',
   );
   const needsWebUiBundle = anyRecipeUsesWebUi(walks);
+  const needsEnvsubst = (parent.recipe.containerTemplateFiles ?? []).some(
+    (tf) => tf.runtimeRender === true || (tf.runtimeVars?.length ?? 0) > 0,
+  );
   const persistentDirs = collectWorkspaceMountPaths(walks);
   const hasAnySecret = sources.some((s) => s.authSecret);
   const imageName = options.imageName ?? deriveImageName(parent.recipe);
@@ -128,6 +131,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     needsNode,
     needsPython,
     needsWebUiBundle,
+    needsEnvsubst,
     parentRecipeBasename,
   }));
 
@@ -251,6 +255,7 @@ interface RuntimeStageArgs {
   persistentDirs: string[];
   needsNode: boolean;
   needsPython: boolean;
+  needsEnvsubst: boolean;
   needsWebUiBundle: boolean;
   parentRecipeBasename: string;
 }
@@ -263,6 +268,7 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
     persistentDirs,
     needsNode,
     needsPython,
+    needsEnvsubst,
     needsWebUiBundle,
     parentRecipeBasename,
   } = args;
@@ -273,9 +279,11 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   lines.push('');
 
   // apt step — tini, ca-certificates, gosu (for entrypoint user-drop),
-  // optional python3.
+  // optional python3, optional envsubst (for runtime-rendered container
+  // templates).
   const aptPackages = ['tini', 'ca-certificates', 'gosu'];
   if (needsPython) aptPackages.push('python3', 'python3-venv');
+  if (needsEnvsubst) aptPackages.push('gettext-base');
   lines.push('RUN apt-get update \\');
   lines.push(` && apt-get install -y --no-install-recommends ${aptPackages.join(' ')} \\`);
   lines.push(' && rm -rf /var/lib/apt/lists/*');

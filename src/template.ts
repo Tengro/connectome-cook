@@ -31,13 +31,20 @@ const TEMPLATE_RE = /\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
 export function renderTemplate(
   template: string,
   values: Record<string, string>,
+  options?: { protectedVars?: string[] },
 ): RenderResult {
   const missing = new Set<string>();
+  const protectedSet = new Set(options?.protectedVars ?? []);
   const rendered = template.replace(
     TEMPLATE_RE,
     (match, name: string | undefined, defaultValue: string | undefined) => {
       if (match === '$$') return '$';
       const n = name!;
+      // Protected names round-trip as literal `${NAME}` — for partial-render
+      // mode where the conhost entrypoint will substitute these at startup
+      // (the `:-default` form gets stripped because POSIX envsubst doesn't
+      // grok it; protected vars therefore must always be supplied at runtime).
+      if (protectedSet.has(n)) return `\${${n}}`;
       const v = values[n];
       // Treat empty string as unset — operators occasionally `export FOO=`
       // to clear a value and expect the default to apply.  Mirrors

@@ -71,7 +71,28 @@ export function generateCompose(input: GeneratorInput): string {
     buildSecrets,
     sidecars,
     allSecretNames: Array.from(allSecretNames).sort(),
+    mainDependsOn: parent.recipe.containerDependsOn,
   });
+}
+
+/** Render a compose `depends_on` block to YAML lines.  Accepts both the
+ *  flat list form (`["a", "b"]`) and the structured map form
+ *  (`{ a: { condition: ... } }`).  Returns indented lines under the parent
+ *  service (no `depends_on:` header — caller emits that). */
+function renderDependsOnLines(
+  value: import('../vendor/recipe.js').RecipeDependsOn,
+  indent: string,
+): string[] {
+  const lines: string[] = [];
+  if (Array.isArray(value)) {
+    for (const dep of value) lines.push(`${indent}- ${dep}`);
+  } else {
+    for (const [name, entry] of Object.entries(value)) {
+      lines.push(`${indent}${name}:`);
+      lines.push(`${indent}  condition: ${entry.condition}`);
+    }
+  }
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,12 +188,36 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
   // Top-level containerTemplateFiles on the parent recipe — agent-side
   // generated config files (e.g. mediawiki-mcp-server's config.json) that
   // need a bind mount at the declared in-container path.
+  //
+  // runtimeRender entries get mounted at `<inContainer>.tmpl` instead, so
+  // the conhost entrypoint can envsubst them at container start (filling
+  // values that don't exist at cook time — e.g. a bot password produced
+  // by a bootstrap sidecar after the wiki schema is installed).
   const parent = walks[0];
   if (parent) {
-    for (const tf of parent.recipe.containerTemplateFiles ?? []) {
+    // Operator-declared extra binds — added on top of the cook-derived
+    // volumes.  Common shape: read-only bind of a directory the bootstrap
+    // sidecar writes to.
+    for (const cv of parent.recipe.containerVolumes ?? []) {
+      const hostBase = cv.source.replace(/^\.\//, '').replace(/^\/+/, '');
       volumes.push({
-        host: `./${tf.hostPath.replace(/^\.\//, '').replace(/^\/+/, '')}`,
-        container: tf.inContainer,
+        host: `./${hostBase}`,
+        container: cv.target,
+        readOnly: cv.readOnly === true,
+      });
+    }
+    for (const tf of parent.recipe.containerTemplateFiles ?? []) {
+      // runtimeRender / runtimeVars: host file gets `.tmpl` suffix
+      // (cli.ts handles the write); container bind path matches.
+      // Conhost entrypoint then envsubsts `<inContainer>.tmpl` ->
+      // `<inContainer>` at startup.
+      const isRuntimeRendered = tf.runtimeRender === true || (tf.runtimeVars?.length ?? 0) > 0;
+      const hostBase = tf.hostPath.replace(/^\.\//, '').replace(/^\/+/, '');
+      const hostPath = isRuntimeRendered ? `${hostBase}.tmpl` : hostBase;
+      const containerPath = isRuntimeRendered ? `${tf.inContainer}.tmpl` : tf.inContainer;
+      volumes.push({
+        host: `./${hostPath}`,
+        container: containerPath,
         readOnly: true,
       });
     }
@@ -299,6 +344,10 @@ interface RenderInput {
   /** Union of every secret name (build + sidecar) that needs a top-level
    *  secrets entry.  Sorted for deterministic output. */
   allSecretNames: string[];
+  /** `depends_on` block for the main agent service.  Optional; only set
+   *  when the recipe declares `containerDependsOn` (used e.g. to make the
+   *  main service wait for a one-shot bootstrap sidecar). */
+  mainDependsOn?: import('../vendor/recipe.js').RecipeDependsOn;
 }
 
 const HEADER = [
@@ -319,7 +368,7 @@ const HEADER = [
 ].join('\n');
 
 function renderCompose(input: RenderInput): string {
-  const { serviceName, imageName, volumes, buildSecrets, sidecars, allSecretNames } = input;
+  const { serviceName, imageName, volumes, buildSecrets, sidecars, allSecretNames, mainDependsOn } = input;
 
   const lines: string[] = [];
   lines.push(HEADER);
@@ -340,6 +389,13 @@ function renderCompose(input: RenderInput): string {
     lines.push('      secrets:');
     for (const s of buildSecrets) {
       lines.push(`        - ${s.authSecret}`);
+    }
+  }
+  if (mainDependsOn !== undefined) {
+    lines.push('');
+    lines.push('    depends_on:');
+    for (const dl of renderDependsOnLines(mainDependsOn, '      ')) {
+      lines.push(dl);
     }
   }
   lines.push('');
@@ -376,17 +432,31 @@ function renderCompose(input: RenderInput): string {
     lines.push(`    image: ${svc.image}`);
     lines.push(`    container_name: ${svc.name}`);
     if (svc.restart) {
-      lines.push(`    restart: ${svc.restart}`);
+      // Quote defensively — YAML parses bareword `no` as boolean false,
+      // which docker-compose rejects.  Quoting is harmless for the other
+      // valid values (`unless-stopped` / `always` / `on-failure`).
+      lines.push(`    restart: "${svc.restart}"`);
     } else {
       // Sensible default — operator probably wants sidecars to come back
       // after a host reboot or transient crash.
       lines.push('    restart: unless-stopped');
     }
-    if (svc.dependsOn && svc.dependsOn.length > 0) {
-      lines.push('    depends_on:');
-      for (const dep of svc.dependsOn) {
-        lines.push(`      - ${dep}`);
+    if (svc.dependsOn !== undefined) {
+      const isEmpty = Array.isArray(svc.dependsOn)
+        ? svc.dependsOn.length === 0
+        : Object.keys(svc.dependsOn).length === 0;
+      if (!isEmpty) {
+        lines.push('    depends_on:');
+        for (const dl of renderDependsOnLines(svc.dependsOn, '      ')) {
+          lines.push(dl);
+        }
       }
+    }
+    if (svc.command && svc.command.length > 0) {
+      // Override the image's default CMD.  JSON-array form so the entries
+      // are exec'd directly (no shell parsing), matching docker compose's
+      // long form.
+      lines.push(`    command: ${JSON.stringify(svc.command)}`);
     }
     if (svc.ports && svc.ports.length > 0) {
       lines.push('    ports:');
