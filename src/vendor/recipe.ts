@@ -257,6 +257,11 @@ export interface RecipeSidecarService {
     retries?: number;
     startPeriod?: string;
   };
+  /** Grace period docker gives the container between SIGTERM and SIGKILL on
+   *  `docker stop` / `docker compose down`.  Default (when unset) is 10s.
+   *  Set higher for services that need time to flush state cleanly —
+   *  e.g. mariadb's XA tc.log can corrupt under abrupt SIGKILL. */
+  stopGracePeriod?: string;
   templateFiles?: RecipeTemplateFile[];
 }
 
@@ -774,6 +779,11 @@ export function validateRecipe(raw: unknown): Recipe {
         const allowed = ['unless-stopped', 'no', 'always', 'on-failure'];
         if (typeof svc.restart !== 'string' || !allowed.includes(svc.restart)) {
           throw new Error(`services[${i}].restart must be one of ${allowed.join(' / ')}`);
+        }
+      }
+      if (svc.stopGracePeriod !== undefined) {
+        if (typeof svc.stopGracePeriod !== 'string' || !svc.stopGracePeriod) {
+          throw new Error(`services[${i}].stopGracePeriod must be a non-empty string like "30s"`);
         }
       }
       if (svc.healthcheck !== undefined) {

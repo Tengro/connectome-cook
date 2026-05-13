@@ -496,6 +496,9 @@ function renderCompose(input: RenderInput): string {
       if (hc.retries !== undefined) lines.push(`      retries: ${hc.retries}`);
       if (hc.startPeriod) lines.push(`      start_period: ${hc.startPeriod}`);
     }
+    if (svc.stopGracePeriod) {
+      lines.push(`    stop_grace_period: ${svc.stopGracePeriod}`);
+    }
   }
 
   if (allSecretNames.length > 0) {
