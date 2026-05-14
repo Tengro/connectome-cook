@@ -18,13 +18,16 @@
 # ---------------------------------------------------------------------------
 
 # ---- Stage 1: clone + build zulip_mcp from antra-tess PR #3 ---------------
+# Build at /zulip_mcp (the final runtime path) so any absolute paths the
+# build bakes in remain valid after the cross-stage COPY.  Not strictly
+# necessary for npm builds, but uniform with pip-editable sources where
+# it's load-bearing (entry-point shebangs).
 FROM node:20-bookworm-slim AS zulip-mcp-build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-RUN git clone https://github.com/antra-tess/zulip_mcp.git \
- && cd zulip_mcp \
+RUN git clone https://github.com/antra-tess/zulip_mcp.git /zulip_mcp \
+ && cd /zulip_mcp \
  && git fetch origin refs/pull/3/head:mcpl-addendum \
  && git checkout mcpl-addendum \
  && npm install --no-audit --no-fund \
@@ -62,8 +65,9 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 # zulip_mcp at /zulip_mcp so the recipe path "../zulip_mcp/build/index.js"
-# resolves correctly when bun runs in /app.
-COPY --from=zulip-mcp-build /build/zulip_mcp /zulip_mcp
+# resolves correctly when bun runs in /app.  Source path == target path
+# because Stage 1 builds at /zulip_mcp directly.
+COPY --from=zulip-mcp-build /zulip_mcp /zulip_mcp
 
 # connectome-host at /app
 WORKDIR /app

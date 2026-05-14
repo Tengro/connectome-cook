@@ -27,7 +27,9 @@ A conductor recipe that references children as `./knowledge-miner.json` resolves
 ### 5. venv portability lies
 COPY-ing a host-built `.venv/` into the container looks like it'll work and breaks at runtime over absolute-path shebangs and `pyvenv.cfg.home` mismatches. Same lesson Docker hit a decade ago with `node_modules`.
 
-**For connectome-cook:** always rebuild Python venvs *inside* the image at build time. Never trust a COPY of `.venv/`. Same for `node_modules`.
+The cross-stage variant of the same bug is subtler: building a venv at `/build/foo/.venv/` in a builder stage and `COPY --from=builder /build/foo /foo`'ing it into the runtime stage *looks* like a self-contained rebuild, but pip wrote shebangs and `pyvenv.cfg home =` against `/build/foo/` and they don't follow the COPY. The script's `ls` finds it, `exec` returns ENOENT — because the kernel ENOENT is against the shebang interpreter, not the script.
+
+**For connectome-cook:** always rebuild Python venvs *inside* the image at build time, **and rebuild at the same absolute path the runtime will use** (`source.inContainerPath`). The cook runtimes do this uniformly across `npm`/`pip-editable`/`custom` — same rule, one less category of surprise. Never trust a COPY of `.venv/`. Same for `node_modules`.
 
 ### 6. Symlink semantics in Docker COPY are surprising
 `COPY /usr/local/bin/npx /usr/local/bin/npx` from a stage where `npx` is a symlink: Docker follows the symlink and materializes the resolved file at the destination. The resolved file (`npm-cli.js`) does `require('../lib/cli.js')` relative to its own location — now broken because the relative path doesn't resolve in the new location.

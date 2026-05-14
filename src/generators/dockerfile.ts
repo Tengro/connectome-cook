@@ -9,10 +9,12 @@
  *   1. One **builder stage** per `McpSource` whose install kind is
  *      `npm` / `pip-editable` / `custom`. Each stage:
  *        - apt-installs `git ca-certificates`,
- *        - sets `WORKDIR /build`, then
  *        - splices `getRuntime(source.install).installSteps(source)` —
- *          which does the `git clone` (with optional BuildKit secret mount
- *          for private repos) + the install.
+ *          which clones into `source.inContainerPath` (with optional
+ *          BuildKit secret mount for private repos) and runs the install
+ *          there.  Building at the same absolute path the runtime stage
+ *          will COPY out keeps absolute paths inside the build (pip
+ *          shebangs, pyvenv.cfg `home =`) valid across stages.
  *      Sibling-copy sources do NOT get a builder stage; the runtime stage
  *      copies them straight from the build context.
  *
@@ -33,8 +35,8 @@
  *        - apt-installs `tini ca-certificates` + `python3` (if any source's
  *          runtime is python3),
  *        - COPYs `node` + `npm`/`npx` from the node alias if needed,
- *        - COPYs each builder stage's `/build/<basename>` into its
- *          `inContainerPath`,
+ *        - COPYs each builder stage's `inContainerPath` to the same path
+ *          in the runtime (build-at-final-path; no rewrite needed),
  *        - COPYs sibling-copy sources from the build context,
  *        - COPYs node_modules + connectome-host source from `ch-deps`,
  *        - COPYs `recipes/` from the build context (cook writes the
@@ -214,7 +216,10 @@ function renderBuilderStage(source: McpSource, stageName: string): string {
   lines.push('RUN apt-get update \\');
   lines.push(' && apt-get install -y --no-install-recommends git ca-certificates \\');
   lines.push(' && rm -rf /var/lib/apt/lists/*');
-  lines.push('WORKDIR /build');
+  // No WORKDIR: each runtime's installSteps clones into and operates on
+  // `source.inContainerPath` (absolute) so the build artefact lands at
+  // the same path the runtime stage COPYs from — pip-editable shebangs
+  // need this to remain valid across the cross-stage COPY.
   lines.push(runtime.installSteps(source));
   return lines.join('\n');
 }
@@ -302,11 +307,12 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
     lines.push('');
   }
 
-  // COPY each builder stage's /build/<basename> into its inContainerPath.
+  // COPY each builder stage's source dir into the runtime at the same
+  // absolute path it was built at — runtimes build at source.inContainerPath
+  // so this is a same-path same-path copy.
   for (const source of builderSources) {
     const stage = stageNames.get(source.key)!;
-    const dir = repoBasename(source.url);
-    lines.push(`COPY --from=${stage} /build/${dir} ${source.inContainerPath}`);
+    lines.push(`COPY --from=${stage} ${source.inContainerPath} ${source.inContainerPath}`);
   }
   if (builderSources.length > 0) lines.push('');
 
