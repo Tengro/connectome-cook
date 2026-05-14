@@ -216,6 +216,123 @@ describe('generateCompose — no workspace mounts', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Workspace mount mode-conflict resolution — most-permissive wins
+// ---------------------------------------------------------------------------
+
+describe('generateCompose — workspace mount mode conflict', () => {
+  test('promotes ro→rw when a later walker declares the same path read-write', () => {
+    // Two recipes both mount /app/shared.  Reader is enumerated first,
+    // writer second.  Previous policy (first-write-wins on mode) would
+    // emit `:ro`, which is the bug that broke encyclopedist writing
+    // wiki-updates on prod.  New policy: most-permissive wins.
+    const reader: Recipe = {
+      name: 'Reader',
+      agent: { systemPrompt: 'placeholder' },
+      modules: {
+        workspace: {
+          mounts: [{ name: 'shared', path: './shared', mode: 'read-only' }],
+        },
+      },
+    } as Recipe;
+    const writer: Recipe = {
+      name: 'Writer',
+      agent: { systemPrompt: 'placeholder' },
+      modules: {
+        workspace: {
+          mounts: [{ name: 'shared', path: './shared', mode: 'read-write' }],
+        },
+      },
+    } as Recipe;
+
+    const input: GeneratorInput = {
+      walks: [
+        { path: '/synthetic/reader.json', recipe: reader },
+        { path: '/synthetic/writer.json', recipe: writer },
+      ],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    };
+
+    const out = generateCompose(input);
+
+    // The bind must be RW so the writer's writes actually land.
+    expect(out).toContain('- ./shared:/app/shared');
+    expect(out).not.toMatch(/- \.\/shared:\/app\/shared:ro/);
+  });
+
+  test('keeps rw when the reader is enumerated second', () => {
+    // Symmetric case: writer first, reader second.  Result is still RW.
+    const writer: Recipe = {
+      name: 'Writer',
+      agent: { systemPrompt: 'placeholder' },
+      modules: {
+        workspace: {
+          mounts: [{ name: 'shared', path: './shared', mode: 'read-write' }],
+        },
+      },
+    } as Recipe;
+    const reader: Recipe = {
+      name: 'Reader',
+      agent: { systemPrompt: 'placeholder' },
+      modules: {
+        workspace: {
+          mounts: [{ name: 'shared', path: './shared', mode: 'read-only' }],
+        },
+      },
+    } as Recipe;
+
+    const input: GeneratorInput = {
+      walks: [
+        { path: '/synthetic/writer.json', recipe: writer },
+        { path: '/synthetic/reader.json', recipe: reader },
+      ],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    };
+
+    const out = generateCompose(input);
+    expect(out).toContain('- ./shared:/app/shared');
+    expect(out).not.toMatch(/- \.\/shared:\/app\/shared:ro/);
+  });
+
+  test('stays ro when all walkers declare ro', () => {
+    const reader1: Recipe = {
+      name: 'Reader1',
+      agent: { systemPrompt: 'placeholder' },
+      modules: {
+        workspace: {
+          mounts: [{ name: 'shared', path: './shared', mode: 'read-only' }],
+        },
+      },
+    } as Recipe;
+    const reader2: Recipe = {
+      name: 'Reader2',
+      agent: { systemPrompt: 'placeholder' },
+      modules: {
+        workspace: {
+          mounts: [{ name: 'shared', path: './shared', mode: 'read-only' }],
+        },
+      },
+    } as Recipe;
+
+    const input: GeneratorInput = {
+      walks: [
+        { path: '/synthetic/r1.json', recipe: reader1 },
+        { path: '/synthetic/r2.json', recipe: reader2 },
+      ],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    };
+
+    const out = generateCompose(input);
+    expect(out).toContain('- ./shared:/app/shared:ro');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Source with authSecret → top-level secrets block emitted
 // ---------------------------------------------------------------------------
 

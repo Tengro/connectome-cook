@@ -134,8 +134,21 @@ interface ComposeVolume {
 /**
  * Aggregate workspace mounts across every walked recipe.  Dedup key is the
  * normalized container path so two recipes mounting different host names at
- * `./output` collapse to a single entry (first-write-wins on host name +
- * mode — mirrors source-detector's first-wins policy).
+ * `./output` collapse to a single entry.
+ *
+ * Dedup policy:
+ *   - host name: first-write-wins (mirrors source-detector's first-wins
+ *     policy; subsequent declarations with a different host name are
+ *     ignored)
+ *   - mode: most-permissive wins.  If ANY walker declares the mount
+ *     read-write, the docker bind is read-write — otherwise the writer
+ *     agent's writes would land on a read-only bind and fail with EACCES
+ *     regardless of what the agent's recipe says.  Reader agents are
+ *     still scoped to read-only at the agent-framework layer by their own
+ *     workspace.mounts entry; this only governs the docker bind
+ *     permission.  Symptom of the previous first-wins-on-mode policy was
+ *     the encyclopedist failing to write wiki-updates/ on prod because
+ *     the clerk's read-only declaration was enumerated first.
  *
  * Credential files (declared via `mcpServers[*].credentialFiles`) get a
  * read-only file-bind mount each: `./<basename>:<container-path>:ro`.
@@ -151,8 +164,14 @@ function collectVolumes(walks: WalkResult[]): ComposeVolume[] {
     if (!workspace || typeof workspace !== 'object' || !workspace.mounts) continue;
     for (const mount of workspace.mounts) {
       const v = mountToVolume(mount);
-      // First-write-wins on container path.
-      if (!byContainer.has(v.container)) {
+      const existing = byContainer.get(v.container);
+      if (existing) {
+        // Mode: most-permissive wins (promote ro→rw, never demote rw→ro).
+        if (existing.readOnly && !v.readOnly) {
+          byContainer.set(v.container, { ...existing, readOnly: false });
+        }
+        // Host name: first-write-wins (no change).
+      } else {
         byContainer.set(v.container, v);
       }
     }
