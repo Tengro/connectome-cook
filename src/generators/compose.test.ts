@@ -542,3 +542,80 @@ describe('generateCompose — sidecar services', () => {
     expect(out).toMatch(/mariadb:[\s\S]*?secrets:[\s\S]*?- WIKI_DB_PASSWORD/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. modules.webui — main-service port mapping
+// ---------------------------------------------------------------------------
+
+describe('generateCompose — webui port mapping', () => {
+  function singleRecipe(modules: Recipe['modules']): GeneratorInput {
+    const recipe: Recipe = {
+      name: 'webui-test',
+      agent: { systemPrompt: 'placeholder' },
+      modules,
+    } as Recipe;
+    return {
+      walks: [{ path: '/synthetic/webui.json', recipe }],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    };
+  }
+
+  test('no ports: block on main service when no recipe enables webui', () => {
+    const out = generateCompose(singleRecipe(undefined as unknown as Recipe['modules']));
+    // No ports: line on the main service.  (Sidecar tests cover sidecar
+    // ports separately; this checks the gap-2 main-service emission only.)
+    expect(out).not.toMatch(/^ {4}ports:/m);
+  });
+
+  test('emits 127.0.0.1 loopback port mapping when modules.webui is true', () => {
+    const out = generateCompose(singleRecipe({ webui: true } as Recipe['modules']));
+    // Default port 7340 matches connectome-host's WebUiModule default.
+    expect(out).toMatch(/^ {4}ports:\n {6}- "127\.0\.0\.1:7340:7340"$/m);
+  });
+
+  test('emits the declared port when modules.webui is an object with explicit port', () => {
+    const out = generateCompose(
+      singleRecipe({
+        webui: { host: '0.0.0.0', port: 8888, basicAuth: { username: 'a', password: 'b' } },
+      } as Recipe['modules']),
+    );
+    expect(out).toMatch(/^ {4}ports:\n {6}- "127\.0\.0\.1:8888:8888"$/m);
+  });
+
+  test('falls back to default port when object form omits port', () => {
+    const out = generateCompose(
+      singleRecipe({ webui: { host: '0.0.0.0' } } as Recipe['modules']),
+    );
+    expect(out).toMatch(/^ {4}ports:\n {6}- "127\.0\.0\.1:7340:7340"$/m);
+  });
+
+  test('detects webui declared on a fleet child (not just the parent)', () => {
+    const parent: Recipe = {
+      name: 'fleet-parent',
+      agent: { systemPrompt: 'placeholder' },
+    } as Recipe;
+    const child: Recipe = {
+      name: 'fleet-child',
+      agent: { systemPrompt: 'placeholder' },
+      modules: { webui: { port: 9999 } },
+    } as Recipe;
+    const input: GeneratorInput = {
+      walks: [
+        { path: '/synthetic/parent.json', recipe: parent },
+        { path: '/synthetic/child.json', recipe: child },
+      ],
+      sources: [],
+      envVars: [],
+      options: defaultOptions(),
+    };
+    const out = generateCompose(input);
+    expect(out).toMatch(/^ {4}ports:\n {6}- "127\.0\.0\.1:9999:9999"$/m);
+  });
+
+  test('modules.webui: false leaves the main service portless', () => {
+    const out = generateCompose(singleRecipe({ webui: false } as Recipe['modules']));
+    expect(out).not.toMatch(/^ {4}ports:/m);
+  });
+});

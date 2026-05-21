@@ -42,6 +42,7 @@ export function generateCompose(input: GeneratorInput): string {
   const imageName = input.options.imageName ?? `${serviceName}:latest`;
 
   const volumes = collectVolumes(input.walks);
+  const webUiPort = collectWebUiPort(input.walks);
   // Build-time secrets from mcpServers[].source.authSecret — deduped by name.
   const buildSecrets: McpSource[] = [];
   const seenAuthSecrets = new Set<string>();
@@ -68,11 +69,38 @@ export function generateCompose(input: GeneratorInput): string {
     serviceName,
     imageName,
     volumes,
+    webUiPort,
     buildSecrets,
     sidecars,
     allSecretNames: Array.from(allSecretNames).sort(),
     mainDependsOn: parent.recipe.containerDependsOn,
   });
+}
+
+/** Default port when a recipe enables `modules.webui` without an explicit
+ *  port — matches connectome-host's WebUiModule default. */
+const DEFAULT_WEBUI_PORT = 7340;
+
+/** Collect the WebUI port to publish on the host, scanning the parent and
+ *  fleet-child recipes.  Returns undefined when no recipe enables webui.
+ *  When a webui block is found, returns its declared `port` (object shape)
+ *  or DEFAULT_WEBUI_PORT (for `true` or object without `port`).
+ *
+ *  Cook emits a single loopback-only mapping per build — operators with a
+ *  reverse-proxy sidecar (e.g. Caddy fronting both WebUI and a wiki) get
+ *  it as harmless redundancy; recipes without a proxy get the gap-closing
+ *  bind so the WebUI is actually reachable from the host. */
+export function collectWebUiPort(walks: WalkResult[]): number | undefined {
+  for (const walk of walks) {
+    const webui = walk.recipe.modules?.webui;
+    if (webui === undefined || webui === false) continue;
+    if (webui === true) return DEFAULT_WEBUI_PORT;
+    if (typeof webui === 'object') {
+      const port = (webui as { port?: unknown }).port;
+      return typeof port === 'number' ? port : DEFAULT_WEBUI_PORT;
+    }
+  }
+  return undefined;
 }
 
 /** Render a compose `depends_on` block to YAML lines.  Accepts both the
@@ -367,6 +395,11 @@ interface RenderInput {
    *  when the recipe declares `containerDependsOn` (used e.g. to make the
    *  main service wait for a one-shot bootstrap sidecar). */
   mainDependsOn?: import('../vendor/recipe.js').RecipeDependsOn;
+  /** Host port to publish for `modules.webui` on the main service, or
+   *  undefined if no recipe enables webui.  Cook emits a loopback-only
+   *  `127.0.0.1:<port>:<port>` mapping — operators with a reverse-proxy
+   *  sidecar can ignore the duplicate access path or remove the line. */
+  webUiPort?: number;
 }
 
 const HEADER = [
@@ -387,7 +420,7 @@ const HEADER = [
 ].join('\n');
 
 function renderCompose(input: RenderInput): string {
-  const { serviceName, imageName, volumes, buildSecrets, sidecars, allSecretNames, mainDependsOn } = input;
+  const { serviceName, imageName, volumes, buildSecrets, sidecars, allSecretNames, mainDependsOn, webUiPort } = input;
 
   const lines: string[] = [];
   lines.push(HEADER);
@@ -435,6 +468,17 @@ function renderCompose(input: RenderInput): string {
       const suffix = v.readOnly ? ':ro' : '';
       lines.push(`      - ${v.host}:${v.container}${suffix}`);
     }
+  }
+
+  if (webUiPort !== undefined) {
+    lines.push('');
+    lines.push('    # modules.webui exposes the conhost SPA on this port inside the');
+    lines.push('    # container.  Bind to 127.0.0.1 by default so the WebUI is reachable');
+    lines.push('    # from the host loopback only; operators wiring a reverse-proxy');
+    lines.push('    # sidecar (Caddy, Traefik, nginx) can leave this line in place');
+    lines.push('    # (harmless dup access) or remove it.');
+    lines.push('    ports:');
+    lines.push(`      - "127.0.0.1:${webUiPort}:${webUiPort}"`);
   }
 
   lines.push('');
