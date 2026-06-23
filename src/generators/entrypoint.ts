@@ -87,6 +87,14 @@ export function generateEntrypoint(input: GeneratorInput): string {
   lines.push(
     chownLine,
     '',
+    '# Clear stale fleet IPC sockets / pid files left by a previous run. On a',
+    '# container (re)start every agent process is dead (PID 1 is the parent),',
+    '# so any leftover *.sock / *.pid under the data dir is scratch that would',
+    "# only trip the fleet launcher's stale-socket race (connect ENOENT -> the",
+    '# child gets SIGKILLed before it boots, crash-looping). Nothing is',
+    '# listening yet, so clearing them is safe.',
+    'rm -f "${DATA_DIR:-/app/data}"/*/ipc.sock "${DATA_DIR:-/app/data}"/*/headless.pid 2>/dev/null || true',
+    '',
     'exec gosu bun "$@"',
     '',
   );
