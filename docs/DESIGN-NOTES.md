@@ -96,7 +96,7 @@ RecipeMcpServer.source?: {
   url: string;                              // git URL
   ref?: string;                             // default: "main", recommend pinning to SHA
   install?: 'npm' | 'pip-editable' | { run: string };   // build steps inside the cloned dir
-  runtime?: 'node' | 'python3' | 'custom';  // determines apt deps
+  runtime?: 'node' | 'python3' | 'custom' | 'bun';  // determines apt deps + builder base image
   authSecret?: string;                      // build-arg name (e.g. "GITLAB_TOKEN")
   sslBypass?: boolean;                      // for self-signed CAs
   inContainer?: { path: string };           // override the in-container path
@@ -105,6 +105,13 @@ RecipeMcpServer.source?: {
 ```
 
 connectome-cook reads recipes recursively, dedupes sources by `url+ref`, generates one builder stage per unique source, and emits the runtime COPY + apt install for each.
+
+### `bun` runtime + two gaps it exposed (scribe-mcp, Jul 2026)
+
+Added `runtime: 'bun'` (builder base `oven/bun:1-debian`) so bun projects build with `bun install --frozen-lockfile` — the `custom` fallback's bare debian base has no bun and fails. The recipe loader guard (`vendor/recipe.ts`) and connectome-host's real `src/recipe.ts` both had to learn `'bun'`, or the recipe is rejected at container start. **Two gaps remain, both bit scribe:**
+
+1. **No per-source system packages.** cook has no way to say "this source needs `ffmpeg`/`curl` in the *runtime* image". scribe shells out to ffprobe/ffmpeg/curl, so a cooked image runs but every tool but `chat` ENOENTs; boter carries a hand-edit on the runtime apt line. Fix would be a `source.systemPackages: string[]` field flowing into the runtime apt list.
+2. **Merge-order is load-bearing.** A recipe using a newly-added runtime only starts once the *baked* connectome-host (`CH_REF`) contains the matching loader guard. Cook a `runtime: 'bun'` recipe against a `CH_REF` without it and the container dies at `validateRecipe`. Land the loader change (or pin `CH_REF`) before cooking.
 
 ### Compose file shape (mostly recipe-agnostic)
 

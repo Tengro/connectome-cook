@@ -6,7 +6,7 @@ import {
 } from './index.js';
 
 /** Custom install: the recipe's `source.install` is `{ run, runtime }`.
- *  Base image follows the declared runtime (`node`/`python3`/`custom`).
+ *  Base image follows the declared runtime (`node`/`python3`/`custom`/`bun`).
  *  Clones + runs the operator script AT `source.inContainerPath` for
  *  parity with the npm/pip runtimes — see DESIGN-NOTES.md "venv
  *  portability lies".  Operator scripts execute with cwd = inContainerPath.
