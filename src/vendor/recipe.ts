@@ -96,6 +96,10 @@ export interface RecipeMcpServerSource {
   authSecret?: string;
   sslBypass?: boolean;
   inContainer?: { path: string };
+  /** Extra apt packages this source needs in the runtime image (e.g.
+   *  ffmpeg/curl). Build tooling appends them to the runtime apt line;
+   *  ignored by connectome-host at runtime. */
+  systemPackages?: string[];
 }
 
 /** Auxiliary credential / config file an MCP server reads at runtime.
@@ -473,6 +477,12 @@ export function validateRecipe(raw: unknown): Recipe {
         }
         if (src.sslBypass !== undefined && typeof src.sslBypass !== 'boolean') {
           throw new Error(`mcpServers.${id}.source.sslBypass must be a boolean`);
+        }
+        if (src.systemPackages !== undefined) {
+          if (!Array.isArray(src.systemPackages)
+            || (src.systemPackages as unknown[]).some((p) => typeof p !== 'string')) {
+            throw new Error(`mcpServers.${id}.source.systemPackages must be a string[]`);
+          }
         }
         if (src.inContainer !== undefined) {
           if (typeof src.inContainer !== 'object' || src.inContainer === null) {

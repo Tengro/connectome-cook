@@ -208,6 +208,7 @@ function addSourcedServer(
       refs: [ref],
       ...(source.authSecret !== undefined ? { authSecret: source.authSecret } : {}),
       ...(source.sslBypass !== undefined ? { sslBypass: source.sslBypass } : {}),
+      ...(source.systemPackages !== undefined ? { systemPackages: source.systemPackages } : {}),
     };
     byKey.set(key, newSource);
     return;

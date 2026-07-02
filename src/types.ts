@@ -48,6 +48,10 @@ export interface McpSource {
   sslBypass?: boolean;
   /** Absolute path inside the image where the source lives after install. */
   inContainerPath: string;
+  /** Extra apt packages this source needs in the *runtime* image (e.g.
+   *  `ffmpeg`/`curl` for a tool that shells out). Merged into the runtime
+   *  apt line — cook can't otherwise know a source's runtime binary deps. */
+  systemPackages?: string[];
   /** Where this source is referenced (for error messages + README). */
   refs: SourceRef[];
 }

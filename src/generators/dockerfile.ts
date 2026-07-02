@@ -289,6 +289,14 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   const aptPackages = ['tini', 'ca-certificates', 'gosu'];
   if (needsPython) aptPackages.push('python3', 'python3-venv');
   if (needsEnvsubst) aptPackages.push('gettext-base');
+  // Per-source runtime binary deps (e.g. scribe needs ffmpeg/curl). cook has
+  // no other way to know a source shells out to a system binary at runtime.
+  const systemPackages = [
+    ...new Set(
+      [...builderSources, ...siblingSources].flatMap((s) => s.systemPackages ?? []),
+    ),
+  ].sort();
+  aptPackages.push(...systemPackages);
   lines.push('RUN apt-get update \\');
   lines.push(` && apt-get install -y --no-install-recommends ${aptPackages.join(' ')} \\`);
   lines.push(' && rm -rf /var/lib/apt/lists/*');

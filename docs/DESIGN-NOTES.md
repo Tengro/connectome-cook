@@ -108,10 +108,11 @@ connectome-cook reads recipes recursively, dedupes sources by `url+ref`, generat
 
 ### `bun` runtime + two gaps it exposed (scribe-mcp, Jul 2026)
 
-Added `runtime: 'bun'` (builder base `oven/bun:1-debian`) so bun projects build with `bun install --frozen-lockfile` — the `custom` fallback's bare debian base has no bun and fails. The recipe loader guard (`vendor/recipe.ts`) and connectome-host's real `src/recipe.ts` both had to learn `'bun'`, or the recipe is rejected at container start. **Two gaps remain, both bit scribe:**
+Added `runtime: 'bun'` (builder base `oven/bun:1-debian`) so bun projects build with `bun install --frozen-lockfile` — the `custom` fallback's bare debian base has no bun and fails. The recipe loader guard (`vendor/recipe.ts`) and connectome-host's real `src/recipe.ts` both had to learn `'bun'`, or the recipe is rejected at container start.
 
-1. **No per-source system packages.** cook has no way to say "this source needs `ffmpeg`/`curl` in the *runtime* image". scribe shells out to ffprobe/ffmpeg/curl, so a cooked image runs but every tool but `chat` ENOENTs; boter carries a hand-edit on the runtime apt line. Fix would be a `source.systemPackages: string[]` field flowing into the runtime apt list.
-2. **Merge-order is load-bearing.** A recipe using a newly-added runtime only starts once the *baked* connectome-host (`CH_REF`) contains the matching loader guard. Cook a `runtime: 'bun'` recipe against a `CH_REF` without it and the container dies at `validateRecipe`. Land the loader change (or pin `CH_REF`) before cooking.
+**`source.systemPackages: string[]`** (added same batch) closes the runtime-binary gap: cook had no way to say "this source needs `ffmpeg`/`curl` in the *runtime* image", so scribe cooked into an image where every tool but `chat` ENOENTs. The field is deduped + sorted across all sources and appended to the runtime apt line. The connectome-host loader also learned the field (it ignores it at runtime but must not reject it).
+
+**Merge-order is still load-bearing.** A recipe using a newly-added runtime/field only starts once the *baked* connectome-host (`CH_REF`) contains the matching loader guard. Cook a `runtime: 'bun'` recipe against a `CH_REF` without it and the container dies at `validateRecipe`. Land the loader change (or pin `CH_REF`) before cooking.
 
 ### Compose file shape (mostly recipe-agnostic)
 

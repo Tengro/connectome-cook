@@ -201,6 +201,43 @@ describe('generateDockerfile — custom bun source', () => {
     const runtimeApt = extractRuntimeAptLine(dockerfile);
     expect(runtimeApt).not.toContain('python3');
   });
+
+  test('source.systemPackages are appended to the runtime apt line', () => {
+    const recipe: Recipe = {
+      name: 'syspkg-test',
+      agent: { systemPrompt: 'p' },
+      mcpServers: {
+        media: {
+          command: 'bun',
+          args: ['../media/src/index.ts'],
+          source: {
+            url: 'https://example.com/media.git',
+            install: { runtime: 'bun', run: 'bun install' },
+            systemPackages: ['ffmpeg', 'curl'],
+          },
+        },
+      },
+    } as Recipe;
+    const walks: WalkResult[] = [{ path: '/recipes/syspkg.json', recipe }];
+    const source: McpSource = {
+      key: 'https://example.com/media@main',
+      url: 'https://example.com/media.git',
+      ref: 'main',
+      install: { kind: 'custom', run: 'bun install', runtime: 'bun' },
+      inContainerPath: '/media',
+      systemPackages: ['ffmpeg', 'curl'],
+      refs: [{ recipePath: '/recipes/syspkg.json', mcpServerName: 'media' }],
+    };
+    const input: GeneratorInput = {
+      walks,
+      sources: [source],
+      envVars: [],
+      options: defaultOptions(),
+    };
+    const runtimeApt = extractRuntimeAptLine(generateDockerfile(input));
+    expect(runtimeApt).toContain('ffmpeg');
+    expect(runtimeApt).toContain('curl');
+  });
 });
 
 describe('generateDockerfile — sibling-copy source', () => {
