@@ -156,6 +156,53 @@ describe('generateDockerfile — pip-editable source', () => {
   });
 });
 
+describe('generateDockerfile — custom bun source', () => {
+  test('emits an oven/bun builder stage + runs the frozen-lockfile install', () => {
+    const recipe: Recipe = {
+      name: 'bun-test',
+      agent: { systemPrompt: 'p' },
+      mcpServers: {
+        bunserver: {
+          command: 'bun',
+          args: ['../bun-thing/src/index.ts'],
+          source: {
+            url: 'https://example.com/bun-thing.git',
+            install: { runtime: 'bun', run: 'bun install --frozen-lockfile' },
+          },
+        },
+      },
+    } as Recipe;
+    const walks: WalkResult[] = [{ path: '/recipes/bun.json', recipe }];
+    const source: McpSource = {
+      key: 'https://example.com/bun-thing@main',
+      url: 'https://example.com/bun-thing.git',
+      ref: 'main',
+      install: { kind: 'custom', run: 'bun install --frozen-lockfile', runtime: 'bun' },
+      inContainerPath: '/bun-thing',
+      refs: [{ recipePath: '/recipes/bun.json', mcpServerName: 'bunserver' }],
+    };
+
+    const input: GeneratorInput = {
+      walks,
+      sources: [source],
+      envVars: [],
+      options: defaultOptions(),
+    };
+
+    const dockerfile = generateDockerfile(input);
+
+    // Builder stage must use the bun base image (not the debian `custom` fallback).
+    expect(dockerfile).toContain('FROM oven/bun:1-debian AS bun-thing-build');
+    expect(dockerfile).not.toContain('FROM debian:bookworm-slim AS');
+    // Runs the operator install command from the clone dir.
+    expect(dockerfile).toContain('cd /bun-thing');
+    expect(dockerfile).toContain('bun install --frozen-lockfile');
+    // A bun source needs neither python3 nor node in the runtime apt line.
+    const runtimeApt = extractRuntimeAptLine(dockerfile);
+    expect(runtimeApt).not.toContain('python3');
+  });
+});
+
 describe('generateDockerfile — sibling-copy source', () => {
   test('emits a runtime-stage COPY without any builder stage', () => {
     const recipe: Recipe = {

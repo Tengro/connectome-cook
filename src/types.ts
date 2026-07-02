@@ -24,7 +24,7 @@ export interface WalkResult {
 export type InstallPattern =
   | { kind: 'npm' }
   | { kind: 'pip-editable' }
-  | { kind: 'custom'; run: string; runtime: 'node' | 'python3' | 'custom' }
+  | { kind: 'custom'; run: string; runtime: 'node' | 'python3' | 'custom' | 'bun' }
   /** Operator must supply a sibling checkout at build time; used when a
    *  recipe's MCP server has no `source` block and we're not in `--strict`. */
   | { kind: 'sibling-copy'; siblingDir: string };

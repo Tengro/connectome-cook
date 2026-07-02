@@ -92,7 +92,7 @@ export interface RecipeMcpServerSource {
   install?:
     | 'npm'
     | 'pip-editable'
-    | { run: string; runtime: 'node' | 'python3' | 'custom' };
+    | { run: string; runtime: 'node' | 'python3' | 'custom' | 'bun' };
   authSecret?: string;
   sslBypass?: boolean;
   inContainer?: { path: string };
@@ -458,13 +458,13 @@ export function validateRecipe(raw: unknown): Recipe {
           const isCustom =
             typeof install === 'object' && install !== null
             && typeof (install as Record<string, unknown>).run === 'string'
-            && ['node', 'python3', 'custom'].includes(
+            && ['node', 'python3', 'custom', 'bun'].includes(
               (install as Record<string, unknown>).runtime as string,
             );
           if (!isShorthand && !isCustom) {
             throw new Error(
               `mcpServers.${id}.source.install must be 'npm', 'pip-editable', ` +
-              `or { run: string, runtime: 'node' | 'python3' | 'custom' }`,
+              `or { run: string, runtime: 'node' | 'python3' | 'custom' | 'bun' }`,
             );
           }
         }

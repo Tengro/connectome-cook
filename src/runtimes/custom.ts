@@ -12,10 +12,11 @@ import {
  *  portability lies".  Operator scripts execute with cwd = inContainerPath.
  */
 
-const RUNTIME_BASES: Record<'node' | 'python3' | 'custom', string> = {
+const RUNTIME_BASES: Record<'node' | 'python3' | 'custom' | 'bun', string> = {
   node: 'node:20-bookworm-slim',
   python3: 'python:3.12-bookworm',
   custom: 'debian:bookworm-slim',
+  bun: 'oven/bun:1-debian',
 };
 
 export const baseImage: string = RUNTIME_BASES.custom;

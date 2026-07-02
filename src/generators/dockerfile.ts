@@ -423,9 +423,9 @@ function sanitizeStageName(source: McpSource): string {
 // Recipe introspection
 // ---------------------------------------------------------------------------
 
-/** Determine the build runtime (node / python3 / custom) for a builder source.
+/** Determine the build runtime (node / python3 / custom / bun) for a builder source.
  *  Used to pick which apt packages need installing in the runtime stage. */
-function runtimeForSource(source: McpSource): 'node' | 'python3' | 'custom' {
+function runtimeForSource(source: McpSource): 'node' | 'python3' | 'custom' | 'bun' {
   switch (source.install.kind) {
     case 'npm':
       return 'node';
