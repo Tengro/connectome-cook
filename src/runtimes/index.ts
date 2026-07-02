@@ -29,6 +29,11 @@ export function getRuntime(install: InstallPattern): RuntimeModule {
     case 'npm': return npm;
     case 'pip-editable': return pip;
     case 'custom': return custom;
+    case 'npm-global':
+      throw new Error(
+        'npm-global install has no builder stage — the Dockerfile generator ' +
+        'handles it via a runtime-stage `npm install -g`.',
+      );
     case 'sibling-copy':
       throw new Error(
         'sibling-copy install has no builder stage — the Dockerfile generator ' +

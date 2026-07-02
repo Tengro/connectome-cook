@@ -80,13 +80,28 @@ export interface RecipeMcpServer {
   reconnectIntervalMs?: number;
   channelSubscription?: 'auto' | 'manual' | string[];
   source?: RecipeMcpServerSource;
+  /** Build-only provenance emitted by connectome-cook into the shipped recipe:
+   *  the original `source` block, renamed off the validated `source` key. The
+   *  runtime loader validates `source` (and only understands the git shape) yet
+   *  never uses it, so cook demotes it here to keep a human/tooling-readable
+   *  record of where each server came from without tripping validation. Not
+   *  consumed at runtime, and NOT re-detected by cook (the detector keys off
+   *  `source`), so it is provenance only. */
+  sourceMeta?: RecipeMcpServerSource;
   /** Auxiliary credential / config files this MCP needs at runtime
    *  (e.g. `.zuliprc`).  Build tooling collects values, writes the file,
    *  bind-mounts it.  Ignored at runtime by connectome-host's loader. */
   credentialFiles?: RecipeCredentialFile[];
 }
 
-export interface RecipeMcpServerSource {
+/** Where an MCP server's code comes from at image build time. Either a git
+ *  checkout (`url` + clone/build) or a published npm package installed
+ *  globally so the recipe's `npx` command resolves it offline. */
+export type RecipeMcpServerSource =
+  | RecipeMcpServerGitSource
+  | RecipeMcpServerNpmSource;
+
+export interface RecipeMcpServerGitSource {
   url: string;
   ref?: string;
   install?:
@@ -100,6 +115,16 @@ export interface RecipeMcpServerSource {
    *  ffmpeg/curl). Build tooling appends them to the runtime apt line;
    *  ignored by connectome-host at runtime. */
   systemPackages?: string[];
+}
+
+/** A published npm package to bake into the image via `npm install -g`. Use
+ *  this when a server is launched with `npx -y <package>` so the package (and
+ *  its dep tree) is resolved at build time instead of on first spawn — the
+ *  runtime `npx` then hits the local install and the cold-boot fetch race
+ *  cannot fire. `npm` is the full spec including version, e.g.
+ *  `@professional-wiki/mediawiki-mcp-server@0.12.0`. */
+export interface RecipeMcpServerNpmSource {
+  npm: string;
 }
 
 /** Auxiliary credential / config file an MCP server reads at runtime.
@@ -450,52 +475,69 @@ export function validateRecipe(raw: unknown): Recipe {
           throw new Error(`mcpServers.${id}.source must be an object`);
         }
         const src = server.source as Record<string, unknown>;
-        if (typeof src.url !== 'string' || !src.url) {
-          throw new Error(`mcpServers.${id}.source.url must be a non-empty string`);
+        // Two source shapes: an npm-registry package (`npm`) or a git
+        // checkout (`url`). Exactly one must be present.
+        const hasNpm = src.npm !== undefined;
+        const hasUrl = src.url !== undefined;
+        if (hasNpm && hasUrl) {
+          throw new Error(
+            `mcpServers.${id}.source must set either 'npm' or 'url', not both`,
+          );
         }
-        if (src.ref !== undefined && typeof src.ref !== 'string') {
-          throw new Error(`mcpServers.${id}.source.ref must be a string`);
-        }
-        if (src.install !== undefined) {
-          const install = src.install;
-          const isShorthand = install === 'npm' || install === 'pip-editable';
-          const isCustom =
-            typeof install === 'object' && install !== null
-            && typeof (install as Record<string, unknown>).run === 'string'
-            && ['node', 'python3', 'custom', 'bun'].includes(
-              (install as Record<string, unknown>).runtime as string,
-            );
-          if (!isShorthand && !isCustom) {
-            throw new Error(
-              `mcpServers.${id}.source.install must be 'npm', 'pip-editable', ` +
-              `or { run: string, runtime: 'node' | 'python3' | 'custom' | 'bun' }`,
-            );
+        if (hasNpm) {
+          // npm-registry source: a single package spec, no git/build metadata.
+          if (typeof src.npm !== 'string' || !src.npm) {
+            throw new Error(`mcpServers.${id}.source.npm must be a non-empty string`);
           }
-        }
-        if (src.authSecret !== undefined && typeof src.authSecret !== 'string') {
-          throw new Error(`mcpServers.${id}.source.authSecret must be a string`);
-        }
-        if (src.sslBypass !== undefined && typeof src.sslBypass !== 'boolean') {
-          throw new Error(`mcpServers.${id}.source.sslBypass must be a boolean`);
-        }
-        if (src.systemPackages !== undefined) {
-          // Kept verbatim in sync with connectome-host src/recipe.ts. The
-          // regex bounds these to Debian package names — they're pasted into
-          // the generated Dockerfile's `RUN apt-get install` line, so an
-          // unbounded string is a build-time command-injection vector.
-          if (!Array.isArray(src.systemPackages)
-            || !(src.systemPackages as unknown[]).every(
-              (p) => typeof p === 'string' && /^[a-z0-9][a-z0-9+.\-]+$/.test(p),
-            )) {
-            throw new Error(`mcpServers.${id}.source.systemPackages must be an array of Debian package names`);
+        } else {
+          // git-checkout source.
+          if (typeof src.url !== 'string' || !src.url) {
+            throw new Error(`mcpServers.${id}.source.url must be a non-empty string`);
           }
-        }
-        if (src.inContainer !== undefined) {
-          if (typeof src.inContainer !== 'object' || src.inContainer === null) {
-            throw new Error(`mcpServers.${id}.source.inContainer must be an object`);
+          if (src.ref !== undefined && typeof src.ref !== 'string') {
+            throw new Error(`mcpServers.${id}.source.ref must be a string`);
           }
-          if (typeof (src.inContainer as Record<string, unknown>).path !== 'string') {
-            throw new Error(`mcpServers.${id}.source.inContainer.path must be a string`);
+          if (src.install !== undefined) {
+            const install = src.install;
+            const isShorthand = install === 'npm' || install === 'pip-editable';
+            const isCustom =
+              typeof install === 'object' && install !== null
+              && typeof (install as Record<string, unknown>).run === 'string'
+              && ['node', 'python3', 'custom', 'bun'].includes(
+                (install as Record<string, unknown>).runtime as string,
+              );
+            if (!isShorthand && !isCustom) {
+              throw new Error(
+                `mcpServers.${id}.source.install must be 'npm', 'pip-editable', ` +
+                `or { run: string, runtime: 'node' | 'python3' | 'custom' | 'bun' }`,
+              );
+            }
+          }
+          if (src.authSecret !== undefined && typeof src.authSecret !== 'string') {
+            throw new Error(`mcpServers.${id}.source.authSecret must be a string`);
+          }
+          if (src.sslBypass !== undefined && typeof src.sslBypass !== 'boolean') {
+            throw new Error(`mcpServers.${id}.source.sslBypass must be a boolean`);
+          }
+          if (src.systemPackages !== undefined) {
+            // Kept verbatim in sync with connectome-host src/recipe.ts. The
+            // regex bounds these to Debian package names — they're pasted into
+            // the generated Dockerfile's `RUN apt-get install` line, so an
+            // unbounded string is a build-time command-injection vector.
+            if (!Array.isArray(src.systemPackages)
+              || !(src.systemPackages as unknown[]).every(
+                (p) => typeof p === 'string' && /^[a-z0-9][a-z0-9+.\-]+$/.test(p),
+              )) {
+              throw new Error(`mcpServers.${id}.source.systemPackages must be an array of Debian package names`);
+            }
+          }
+          if (src.inContainer !== undefined) {
+            if (typeof src.inContainer !== 'object' || src.inContainer === null) {
+              throw new Error(`mcpServers.${id}.source.inContainer must be an object`);
+            }
+            if (typeof (src.inContainer as Record<string, unknown>).path !== 'string') {
+              throw new Error(`mcpServers.${id}.source.inContainer.path must be a string`);
+            }
           }
         }
       }

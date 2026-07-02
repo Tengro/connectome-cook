@@ -390,3 +390,66 @@ describe('detectSources — uvx is also skipped', () => {
     expect(detectSources(walks, { strict: false })).toEqual([]);
   });
 });
+
+describe('detectSources — npm-registry source', () => {
+  test('an npx command WITH a source.npm becomes one deduplicated npm-global source', () => {
+    const mk = (path: string): WalkResult => ({
+      path,
+      recipe: {
+        name: 'n',
+        agent: { systemPrompt: 'p' },
+        mcpServers: {
+          mediawiki: {
+            command: 'npx',
+            args: ['-y', '@professional-wiki/mediawiki-mcp-server@0.12.0'],
+            source: { npm: '@professional-wiki/mediawiki-mcp-server@0.12.0' },
+          },
+        },
+      } as Recipe,
+    });
+    // Two recipes referencing the same package spec collapse onto one source.
+    const sources = detectSources([mk('/r/a.json'), mk('/r/b.json')], { strict: true });
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.key).toBe('npm:@professional-wiki/mediawiki-mcp-server@0.12.0');
+    expect(sources[0]!.install).toEqual({
+      kind: 'npm-global',
+      package: '@professional-wiki/mediawiki-mcp-server@0.12.0',
+    });
+    expect(sources[0]!.refs).toHaveLength(2);
+  });
+
+  test('distinct versions of the same package stay separate', async () => {
+    const mk = (version: string): WalkResult => ({
+      path: `/r/${version}.json`,
+      recipe: {
+        name: 'n',
+        agent: { systemPrompt: 'p' },
+        mcpServers: {
+          gitlab: {
+            command: 'npx',
+            args: ['-y', `@zereight/mcp-gitlab@${version}`],
+            source: { npm: `@zereight/mcp-gitlab@${version}` },
+          },
+        },
+      } as Recipe,
+    });
+    const sources = detectSources([mk('2.1.25'), mk('2.2.0')], { strict: true });
+    expect(sources).toHaveLength(2);
+  });
+
+  test('a command-only npx server (no source) is still skipped — the bake is opt-in', () => {
+    const walks: WalkResult[] = [
+      {
+        path: '/r/bare.json',
+        recipe: {
+          name: 'n',
+          agent: { systemPrompt: 'p' },
+          mcpServers: {
+            gitlab: { command: 'npx', args: ['-y', '@zereight/mcp-gitlab'] },
+          },
+        } as Recipe,
+      },
+    ];
+    expect(detectSources(walks, { strict: true })).toEqual([]);
+  });
+});

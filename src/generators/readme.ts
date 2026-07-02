@@ -367,7 +367,7 @@ function mcpServerReferencesZulip(server: RecipeMcpServer): boolean {
       if (arg.includes('.zuliprc')) return true;
     }
   }
-  if (server.source?.url && server.source.url.toLowerCase().includes('zulip')) {
+  if (server.source && 'url' in server.source && server.source.url.toLowerCase().includes('zulip')) {
     return true;
   }
   return false;
@@ -401,7 +401,7 @@ function mcpServerReferencesGitLab(server: RecipeMcpServer): boolean {
       if (arg.toLowerCase().includes('gitlab')) return true;
     }
   }
-  if (server.source?.url && server.source.url.toLowerCase().includes('gitlab')) {
+  if (server.source && 'url' in server.source && server.source.url.toLowerCase().includes('gitlab')) {
     return true;
   }
   return false;

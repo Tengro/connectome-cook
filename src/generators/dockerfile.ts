@@ -67,6 +67,7 @@ import type {
 import type { Recipe, RecipeMcpServer, RecipeWorkspaceMount } from '../vendor/recipe.js';
 import { getRuntime, repoBasename } from '../runtimes/index.js';
 import * as customRuntime from '../runtimes/custom.js';
+import * as npmRuntime from '../runtimes/npm.js';
 
 /** Default URL of the connectome-host repo to clone into the `ch-deps` stage. */
 const DEFAULT_CH_REPO_URL = 'https://github.com/anima-research/connectome-host.git';
@@ -88,11 +89,21 @@ export function generateDockerfile(input: GeneratorInput): string {
 
   const parent = walks[0]!;
   const parentRecipeBasename = basename(parent.path);
-  const builderSources = sources.filter((s) => s.install.kind !== 'sibling-copy');
+  // Three disjoint source categories:
+  //   - builderSources  : git clones that get a builder stage + runtime COPY
+  //   - registrySources : published npm packages baked via `npm install -g`
+  //                       in the runtime stage (no builder stage, no COPY)
+  //   - siblingSources  : operator-supplied checkouts COPY'd from the context
+  const builderSources = sources.filter(
+    (s) => s.install.kind !== 'sibling-copy' && s.install.kind !== 'npm-global',
+  );
+  const registrySources = sources.filter((s) => s.install.kind === 'npm-global');
   const siblingSources = sources.filter((s) => s.install.kind === 'sibling-copy');
   const stageNames = assignStageNames(builderSources);
 
-  const needsNode = anyRecipeUsesNodeCommand(walks);
+  // Registry packages are installed with npm in the runtime stage, so the
+  // image needs node/npm even if no recipe spawns `node`/`npm`/`npx` directly.
+  const needsNode = anyRecipeUsesNodeCommand(walks) || registrySources.length > 0;
   const needsPython = builderSources.some(
     (s) => runtimeForSource(s) === 'python3',
   );
@@ -110,6 +121,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     imageName,
     parentRecipeBasename,
     builderSources,
+    registrySources,
     siblingSources,
     hasAnySecret,
   }));
@@ -127,6 +139,7 @@ export function generateDockerfile(input: GeneratorInput): string {
 
   sections.push(renderRuntimeStage({
     builderSources,
+    registrySources,
     siblingSources,
     stageNames,
     persistentDirs,
@@ -149,12 +162,13 @@ interface HeaderArgs {
   imageName: string;
   parentRecipeBasename: string;
   builderSources: McpSource[];
+  registrySources: McpSource[];
   siblingSources: McpSource[];
   hasAnySecret: boolean;
 }
 
 function renderHeader(args: HeaderArgs): string {
-  const { imageName, parentRecipeBasename, builderSources, siblingSources, hasAnySecret } = args;
+  const { imageName, parentRecipeBasename, builderSources, registrySources, siblingSources, hasAnySecret } = args;
   const lines: string[] = [];
   lines.push('# syntax=docker/dockerfile:1.7');
   lines.push('');
@@ -167,6 +181,11 @@ function renderHeader(args: HeaderArgs): string {
   lines.push('# Stages:');
   for (const source of builderSources) {
     lines.push(`#   - ${source.url}${source.ref && source.ref !== 'main' ? `@${source.ref}` : ''} (${describeInstall(source)})`);
+  }
+  for (const source of registrySources) {
+    if (source.install.kind === 'npm-global') {
+      lines.push(`#   - npm:${source.install.package} (baked via npm install -g in runtime stage)`);
+    }
   }
   for (const source of siblingSources) {
     if (source.install.kind === 'sibling-copy') {
@@ -255,6 +274,7 @@ function renderChDepsStage(): string {
 
 interface RuntimeStageArgs {
   builderSources: McpSource[];
+  registrySources: McpSource[];
   siblingSources: McpSource[];
   stageNames: Map<string, string>;
   persistentDirs: string[];
@@ -268,6 +288,7 @@ interface RuntimeStageArgs {
 function renderRuntimeStage(args: RuntimeStageArgs): string {
   const {
     builderSources,
+    registrySources,
     siblingSources,
     stageNames,
     persistentDirs,
@@ -312,6 +333,19 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
     lines.push(`COPY --from=${NODE_STAGE_ALIAS} /usr/local/lib/node_modules  /usr/local/lib/node_modules`);
     lines.push('RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \\');
     lines.push(' && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx');
+    lines.push('');
+  }
+
+  // Bake published npm packages into the global prefix so the recipe's
+  // `npx -y <package>` resolves them offline at spawn — no first-run fetch,
+  // no cold-boot handshake race. npm is present because needsNode is forced
+  // true whenever registrySources is non-empty.
+  if (registrySources.length > 0) {
+    const packages = registrySources.map((s) =>
+      s.install.kind === 'npm-global' ? s.install.package : '',
+    );
+    lines.push('# Pre-install npx-launched MCP server packages from the registry.');
+    lines.push(npmRuntime.globalInstallStep(packages));
     lines.push('');
   }
 
@@ -437,6 +471,8 @@ function runtimeForSource(source: McpSource): 'node' | 'python3' | 'custom' | 'b
   switch (source.install.kind) {
     case 'npm':
       return 'node';
+    case 'npm-global':
+      return 'node';
     case 'pip-editable':
       return 'python3';
     case 'custom':
@@ -513,6 +549,7 @@ function normalizeMountPath(path: string): string {
 function describeInstall(source: McpSource): string {
   switch (source.install.kind) {
     case 'npm': return 'npm';
+    case 'npm-global': return `npm-global (${source.install.package})`;
     case 'pip-editable': return 'pip-editable';
     case 'custom': return `custom (${source.install.runtime})`;
     case 'sibling-copy': return `sibling-copy (${source.install.siblingDir})`;

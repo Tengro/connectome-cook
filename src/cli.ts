@@ -128,6 +128,25 @@ function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Rec
   return merged;
 }
 
+/** Demote each mcpServer's build-only `source` block to `sourceMeta` before the
+ *  recipe is written into the image. connectome-host validates `source` at load
+ *  but never reads it at runtime — it's build-tooling metadata that cook alone
+ *  consumes (to clone/build or `npm install -g` the server). Worse, the runtime
+ *  validator only knows the git `source` shape, so an npm-registry `source`
+ *  would make the container throw at boot. The validator's sole trigger is the
+ *  key literally named `source` (it has no unknown-key rejection), so renaming
+ *  the block to `sourceMeta` sidesteps validation entirely while keeping the
+ *  provenance visible to anyone reading the shipped recipe. */
+function demoteMcpSource(recipe: Recipe): Recipe {
+  if (!recipe.mcpServers) return recipe;
+  const mcpServers: Record<string, RecipeMcpServer> = {};
+  for (const [name, server] of Object.entries(recipe.mcpServers)) {
+    const { source, ...rest } = server;
+    mcpServers[name] = source === undefined ? rest : { ...rest, sourceMeta: source };
+  }
+  return { ...recipe, mcpServers };
+}
+
 /** Quote a value for safe inclusion in a `.env` file consumed by
  *  docker-compose.  Compose interpolates `${VAR}` patterns AND certain
  *  backslash sequences in unquoted values, so any value containing `$`
@@ -388,7 +407,11 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
 
   const recipesOut = walks.map((walk) => ({
     filename: recipeFilename(walk.path),
-    content: JSON.stringify(applyOverlay(walk.recipe, overlays.get(walk.path)), null, 2) + '\n',
+    content: JSON.stringify(
+      demoteMcpSource(applyOverlay(walk.recipe, overlays.get(walk.path))),
+      null,
+      2,
+    ) + '\n',
   }));
 
   // Only write .env if we have values worth writing — otherwise the
@@ -781,6 +804,8 @@ async function handleCheck(argv: string[]): Promise<number> {
     const refList = src.refs.map((r) => `${r.recipePath.split('/').pop()}#${r.mcpServerName}`).join(', ');
     if (src.install.kind === 'sibling-copy') {
       process.stdout.write(`    ${log.bold(src.key)}  ${log.dim(`(sibling-copy: ${src.install.siblingDir} → ${src.inContainerPath})`)}  used by: ${refList}\n`);
+    } else if (src.install.kind === 'npm-global') {
+      process.stdout.write(`    ${log.bold(src.install.package)}  ${log.dim('(npm install -g, baked into runtime image)')}  used by: ${refList}\n`);
     } else {
       const refLabel = src.ref ? `@${src.ref}` : '';
       process.stdout.write(`    ${log.bold(src.url + refLabel)}  ${log.dim(`(${src.install.kind} → ${src.inContainerPath})`)}  used by: ${refList}\n`);
