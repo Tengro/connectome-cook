@@ -479,9 +479,15 @@ export function validateRecipe(raw: unknown): Recipe {
           throw new Error(`mcpServers.${id}.source.sslBypass must be a boolean`);
         }
         if (src.systemPackages !== undefined) {
+          // Kept verbatim in sync with connectome-host src/recipe.ts. The
+          // regex bounds these to Debian package names — they're pasted into
+          // the generated Dockerfile's `RUN apt-get install` line, so an
+          // unbounded string is a build-time command-injection vector.
           if (!Array.isArray(src.systemPackages)
-            || (src.systemPackages as unknown[]).some((p) => typeof p !== 'string')) {
-            throw new Error(`mcpServers.${id}.source.systemPackages must be a string[]`);
+            || !(src.systemPackages as unknown[]).every(
+              (p) => typeof p === 'string' && /^[a-z0-9][a-z0-9+.\-]+$/.test(p),
+            )) {
+            throw new Error(`mcpServers.${id}.source.systemPackages must be an array of Debian package names`);
           }
         }
         if (src.inContainer !== undefined) {
