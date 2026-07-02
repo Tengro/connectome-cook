@@ -96,7 +96,7 @@ RecipeMcpServer.source?: {
   url: string;                              // git URL
   ref?: string;                             // default: "main", recommend pinning to SHA
   install?: 'npm' | 'pip-editable' | { run: string };   // build steps inside the cloned dir
-  runtime?: 'node' | 'python3' | 'custom';  // determines apt deps
+  runtime?: 'node' | 'python3' | 'custom' | 'bun';  // determines apt deps + builder base image
   authSecret?: string;                      // build-arg name (e.g. "GITLAB_TOKEN")
   sslBypass?: boolean;                      // for self-signed CAs
   inContainer?: { path: string };           // override the in-container path
@@ -105,6 +105,14 @@ RecipeMcpServer.source?: {
 ```
 
 connectome-cook reads recipes recursively, dedupes sources by `url+ref`, generates one builder stage per unique source, and emits the runtime COPY + apt install for each.
+
+### `bun` runtime + two gaps it exposed (scribe-mcp, Jul 2026)
+
+Added `runtime: 'bun'` (builder base `oven/bun:1-debian`) so bun projects build with `bun install --frozen-lockfile` — the `custom` fallback's bare debian base has no bun and fails. The recipe loader guard (`vendor/recipe.ts`) and connectome-host's real `src/recipe.ts` both had to learn `'bun'`, or the recipe is rejected at container start.
+
+**`source.systemPackages: string[]`** (added same batch) closes the runtime-binary gap: cook had no way to say "this source needs `ffmpeg`/`curl` in the *runtime* image", so scribe cooked into an image where every tool but `chat` ENOENTs. The field is deduped + sorted across all sources and appended to the runtime apt line. The connectome-host loader also learned the field (it ignores it at runtime but must not reject it).
+
+**Merge-order is still load-bearing.** A recipe using a newly-added runtime/field only starts once the *baked* connectome-host (`CH_REF`) contains the matching loader guard. Cook a `runtime: 'bun'` recipe against a `CH_REF` without it and the container dies at `validateRecipe`. Land the loader change (or pin `CH_REF`) before cooking.
 
 ### Compose file shape (mostly recipe-agnostic)
 

@@ -6,16 +6,17 @@ import {
 } from './index.js';
 
 /** Custom install: the recipe's `source.install` is `{ run, runtime }`.
- *  Base image follows the declared runtime (`node`/`python3`/`custom`).
+ *  Base image follows the declared runtime (`node`/`python3`/`custom`/`bun`).
  *  Clones + runs the operator script AT `source.inContainerPath` for
  *  parity with the npm/pip runtimes — see DESIGN-NOTES.md "venv
  *  portability lies".  Operator scripts execute with cwd = inContainerPath.
  */
 
-const RUNTIME_BASES: Record<'node' | 'python3' | 'custom', string> = {
+const RUNTIME_BASES: Record<'node' | 'python3' | 'custom' | 'bun', string> = {
   node: 'node:20-bookworm-slim',
   python3: 'python:3.12-bookworm',
   custom: 'debian:bookworm-slim',
+  bun: 'oven/bun:1-debian',
 };
 
 export const baseImage: string = RUNTIME_BASES.custom;

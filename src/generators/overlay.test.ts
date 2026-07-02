@@ -48,7 +48,7 @@ function makeOptions(overrides: Partial<BuildOptions> = {}): BuildOptions {
 }
 
 describe('generateOverlays — triumvirate example', () => {
-  test('returns an empty map (relative paths resolve under /app)', async () => {
+  test('emits one overlay (ddg pip-editable → venv-binary rewrite)', async () => {
     const walks = await walkRecipe(TRIUMVIRATE);
     const sources = detectSources(walks, { strict: false });
     const envVars = collectEnvVars(walks);
@@ -60,12 +60,12 @@ describe('generateOverlays — triumvirate example', () => {
       options: makeOptions(),
     });
 
-    // None of the example recipes need an overlay: clerk and miner both
-    // reference `../zulip_mcp/build/index.js`, which resolves to
-    // `/zulip_mcp/build/index.js` from the conductor's CWD `/app` — and
-    // that's exactly where the source ends up.  The reviewer has no
-    // mcpServers; the parent triumvirate.json has none either.
-    expect(overlays.size).toBe(0);
+    // zulip needs no overlay: clerk and miner both reference
+    // `../zulip_mcp/build/index.js`, which resolves to `/zulip_mcp/build/index.js`
+    // from the conductor's CWD `/app` — exactly where the source ends up.
+    // ddg is pip-editable, so its command is rewritten to the in-container
+    // venv binary — that's the single overlay.
+    expect(overlays.size).toBe(1);
   });
 });
 

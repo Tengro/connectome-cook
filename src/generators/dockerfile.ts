@@ -289,6 +289,14 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   const aptPackages = ['tini', 'ca-certificates', 'gosu'];
   if (needsPython) aptPackages.push('python3', 'python3-venv');
   if (needsEnvsubst) aptPackages.push('gettext-base');
+  // Per-source runtime binary deps (e.g. scribe needs ffmpeg/curl). cook has
+  // no other way to know a source shells out to a system binary at runtime.
+  const systemPackages = [
+    ...new Set(
+      [...builderSources, ...siblingSources].flatMap((s) => s.systemPackages ?? []),
+    ),
+  ].sort();
+  aptPackages.push(...systemPackages);
   lines.push('RUN apt-get update \\');
   lines.push(` && apt-get install -y --no-install-recommends ${aptPackages.join(' ')} \\`);
   lines.push(' && rm -rf /var/lib/apt/lists/*');
@@ -423,9 +431,9 @@ function sanitizeStageName(source: McpSource): string {
 // Recipe introspection
 // ---------------------------------------------------------------------------
 
-/** Determine the build runtime (node / python3 / custom) for a builder source.
+/** Determine the build runtime (node / python3 / custom / bun) for a builder source.
  *  Used to pick which apt packages need installing in the runtime stage. */
-function runtimeForSource(source: McpSource): 'node' | 'python3' | 'custom' {
+function runtimeForSource(source: McpSource): 'node' | 'python3' | 'custom' | 'bun' {
   switch (source.install.kind) {
     case 'npm':
       return 'node';

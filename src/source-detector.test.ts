@@ -32,8 +32,9 @@ describe('detectSources — triumvirate fixtures', () => {
 
     const sources = detectSources(walks, { strict: true });
 
-    expect(sources).toHaveLength(1);
-    const zulip = sources[0]!;
+    // zulip (deduped across clerk + miner) + ddg (miner only).
+    expect(sources).toHaveLength(2);
+    const zulip = sources.find((s) => s.url.includes('zulip_mcp'))!;
 
     expect(zulip.url).toBe('https://github.com/antra-tess/zulip_mcp.git');
     expect(zulip.ref).toBe('main');
@@ -55,11 +56,46 @@ describe('detectSources — triumvirate fixtures', () => {
     const reviewerOnly = [await loadWalk('knowledge-reviewer')];
     expect(detectSources(reviewerOnly, { strict: true })).toEqual([]);
 
-    // Miner has zulip + gitlab; gitlab is npx, so only zulip should appear.
+    // Miner has zulip + gitlab + ddg; gitlab is npx, so it's skipped and
+    // only zulip + ddg (both with `source` blocks) should appear.
     const minerOnly = [await loadWalk('knowledge-miner')];
     const minerSources = detectSources(minerOnly, { strict: true });
-    expect(minerSources).toHaveLength(1);
-    expect(minerSources[0]!.refs.map((r) => r.mcpServerName)).toEqual(['zulip']);
+    expect(minerSources).toHaveLength(2);
+    const names = minerSources.flatMap((s) => s.refs.map((r) => r.mcpServerName)).sort();
+    expect(names).toEqual(['ddg', 'zulip']);
+  });
+});
+
+describe('detectSources — systemPackages union', () => {
+  function mediaRecipe(pkgs?: string[]): Recipe {
+    return {
+      name: 'r',
+      agent: { systemPrompt: 'p' },
+      mcpServers: {
+        media: {
+          command: 'bun',
+          args: ['../media/src/index.ts'],
+          source: {
+            url: 'https://example.com/media.git',
+            install: { runtime: 'bun', run: 'bun install' },
+            ...(pkgs ? { systemPackages: pkgs } : {}),
+          },
+        },
+      },
+    } as Recipe;
+  }
+
+  test('unions systemPackages across refs to one source (no first-write-wins drop)', () => {
+    // Deliberate order: the first ref declares NONE, so a naive first-write
+    // would drop every later declaration and ship an image missing binaries.
+    const walks: WalkResult[] = [
+      { path: '/none.json', recipe: mediaRecipe(undefined) },
+      { path: '/a.json', recipe: mediaRecipe(['ffmpeg']) },
+      { path: '/b.json', recipe: mediaRecipe(['curl', 'ffmpeg']) },
+    ];
+    const sources = detectSources(walks, { strict: false });
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.systemPackages).toEqual(['curl', 'ffmpeg']); // union, deduped + sorted
   });
 });
 

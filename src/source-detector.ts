@@ -208,6 +208,7 @@ function addSourcedServer(
       refs: [ref],
       ...(source.authSecret !== undefined ? { authSecret: source.authSecret } : {}),
       ...(source.sslBypass !== undefined ? { sslBypass: source.sslBypass } : {}),
+      ...(source.systemPackages !== undefined ? { systemPackages: source.systemPackages } : {}),
     };
     byKey.set(key, newSource);
     return;
@@ -256,6 +257,17 @@ function addSourcedServer(
       { ref: firstRef, value: existing.inContainerPath },
       { ref, value: inContainerPath },
     );
+  }
+
+  // systemPackages unions across refs rather than first-write-wins: a
+  // superset apt install is harmless and is the correct semantics for "what
+  // does this source need at runtime" (dropping a later ref's packages would
+  // silently ship an image missing a binary — the exact bug this field
+  // prevents). deduped + sorted so the generated apt line is stable.
+  if (source.systemPackages && source.systemPackages.length > 0) {
+    existing.systemPackages = [
+      ...new Set([...(existing.systemPackages ?? []), ...source.systemPackages]),
+    ].sort();
   }
 
   existing.refs.push(ref);

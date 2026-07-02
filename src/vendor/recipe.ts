@@ -92,10 +92,14 @@ export interface RecipeMcpServerSource {
   install?:
     | 'npm'
     | 'pip-editable'
-    | { run: string; runtime: 'node' | 'python3' | 'custom' };
+    | { run: string; runtime: 'node' | 'python3' | 'custom' | 'bun' };
   authSecret?: string;
   sslBypass?: boolean;
   inContainer?: { path: string };
+  /** Extra apt packages this source needs in the runtime image (e.g.
+   *  ffmpeg/curl). Build tooling appends them to the runtime apt line;
+   *  ignored by connectome-host at runtime. */
+  systemPackages?: string[];
 }
 
 /** Auxiliary credential / config file an MCP server reads at runtime.
@@ -458,13 +462,13 @@ export function validateRecipe(raw: unknown): Recipe {
           const isCustom =
             typeof install === 'object' && install !== null
             && typeof (install as Record<string, unknown>).run === 'string'
-            && ['node', 'python3', 'custom'].includes(
+            && ['node', 'python3', 'custom', 'bun'].includes(
               (install as Record<string, unknown>).runtime as string,
             );
           if (!isShorthand && !isCustom) {
             throw new Error(
               `mcpServers.${id}.source.install must be 'npm', 'pip-editable', ` +
-              `or { run: string, runtime: 'node' | 'python3' | 'custom' }`,
+              `or { run: string, runtime: 'node' | 'python3' | 'custom' | 'bun' }`,
             );
           }
         }
@@ -473,6 +477,18 @@ export function validateRecipe(raw: unknown): Recipe {
         }
         if (src.sslBypass !== undefined && typeof src.sslBypass !== 'boolean') {
           throw new Error(`mcpServers.${id}.source.sslBypass must be a boolean`);
+        }
+        if (src.systemPackages !== undefined) {
+          // Kept verbatim in sync with connectome-host src/recipe.ts. The
+          // regex bounds these to Debian package names — they're pasted into
+          // the generated Dockerfile's `RUN apt-get install` line, so an
+          // unbounded string is a build-time command-injection vector.
+          if (!Array.isArray(src.systemPackages)
+            || !(src.systemPackages as unknown[]).every(
+              (p) => typeof p === 'string' && /^[a-z0-9][a-z0-9+.\-]+$/.test(p),
+            )) {
+            throw new Error(`mcpServers.${id}.source.systemPackages must be an array of Debian package names`);
+          }
         }
         if (src.inContainer !== undefined) {
           if (typeof src.inContainer !== 'object' || src.inContainer === null) {

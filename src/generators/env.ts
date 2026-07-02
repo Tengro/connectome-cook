@@ -21,7 +21,8 @@
  * Placeholder heuristics for required-section values:
  *   - `ANTHROPIC_API_KEY` → `sk-ant-...` (special-case)
  *   - name contains `TOKEN`/`KEY`/`SECRET` → `<scheme>-...` based on prefix
- *     (`GITLAB_*` → `glpat-...`, `GITHUB_*` → `ghp_...`, `*` → `sk-...`)
+ *     (`GITLAB_*` → `glpat-...`, `GITHUB_*` → `ghp_...`, `*GEMINI*`/`*GOOGLE*`
+ *     → `AIza...`, `NOTION_*` → `ntn_...`, `*` → `sk-...`)
  *   - name contains `URL` → `https://...`
  *   - everything else → `<set me>`
  *
@@ -61,6 +62,8 @@ function placeholderFor(name: string): string {
   if (/TOKEN|KEY|SECRET|PASS/.test(name)) {
     if (name.startsWith('GITLAB_')) return 'glpat-...';
     if (name.startsWith('GITHUB_')) return 'ghp_...';
+    if (name.includes('GEMINI') || name.includes('GOOGLE')) return 'AIza...';
+    if (name.startsWith('NOTION_')) return 'ntn_...';
     return 'sk-...';
   }
   return '<set me>';
