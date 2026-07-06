@@ -28,3 +28,18 @@ export function installSteps(source: McpSource): string {
     `RUN cd ${target} \\\n && npm install --no-audit --no-fund \\\n && npm run build`,
   ].join('\n');
 }
+
+/** A single `npm install -g` RUN line that bakes published registry packages
+ *  into the runtime image's global prefix, so a recipe's `npx -y <package>`
+ *  resolves the package offline at spawn instead of fetching it on first run
+ *  (the cold-boot handshake race). Unlike `installSteps`, this runs in the
+ *  runtime stage — npm is already present there because any `npx` command
+ *  makes the generator copy node/npm/npx in. `packages` are full specs
+ *  (`@scope/name@version`); each is shell-quoted to be safe against the `@`
+ *  and any scope slash. Returns '' for an empty list so the caller can splice
+ *  unconditionally. */
+export function globalInstallStep(packages: string[]): string {
+  if (packages.length === 0) return '';
+  const quoted = packages.map((p) => `'${p}'`).join(' ');
+  return `RUN npm install -g --no-audit --no-fund ${quoted}`;
+}

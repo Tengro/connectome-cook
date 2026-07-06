@@ -26,7 +26,11 @@ import type {
   SourceRef,
   WalkResult,
 } from './types.js';
-import type { RecipeMcpServerSource } from './vendor/recipe.js';
+import type {
+  RecipeMcpServerGitSource,
+  RecipeMcpServerNpmSource,
+  RecipeMcpServerSource,
+} from './vendor/recipe.js';
 
 export interface DetectOptions {
   strict: boolean;
@@ -70,7 +74,7 @@ function defaultInContainerPath(url: string): string {
  * being directly executable, e.g. a precompiled `bin/` checked into git).
  */
 function mapInstall(
-  install: RecipeMcpServerSource['install'] | undefined,
+  install: RecipeMcpServerGitSource['install'] | undefined,
 ): InstallPattern {
   if (install === 'npm') return { kind: 'npm' };
   if (install === 'pip-editable') return { kind: 'pip-editable' };
@@ -92,6 +96,9 @@ function installEquals(a: InstallPattern, b: InstallPattern): boolean {
   }
   if (a.kind === 'sibling-copy' && b.kind === 'sibling-copy') {
     return a.siblingDir === b.siblingDir;
+  }
+  if (a.kind === 'npm-global' && b.kind === 'npm-global') {
+    return a.package === b.package;
   }
   return true; // npm vs npm, pip-editable vs pip-editable
 }
@@ -145,7 +152,11 @@ export function detectSources(
       const ref: SourceRef = { recipePath: walk.path, mcpServerName: serverName };
 
       if (server.source) {
-        addSourcedServer(byKey, server.source, ref);
+        if (isNpmRegistrySource(server.source)) {
+          addNpmRegistrySource(byKey, server.source, ref);
+        } else {
+          addSourcedServer(byKey, server.source, ref);
+        }
         continue;
       }
 
@@ -189,7 +200,7 @@ function isRuntimeFetchCommand(command: string | undefined): boolean {
  */
 function addSourcedServer(
   byKey: Map<string, McpSource>,
-  source: RecipeMcpServerSource,
+  source: RecipeMcpServerGitSource,
   ref: SourceRef,
 ): void {
   const refStr = source.ref ?? 'main';
@@ -271,6 +282,41 @@ function addSourcedServer(
   }
 
   existing.refs.push(ref);
+}
+
+/** Narrow a recipe source to the npm-registry shape. */
+function isNpmRegistrySource(
+  source: RecipeMcpServerSource,
+): source is RecipeMcpServerNpmSource {
+  return 'npm' in source;
+}
+
+/**
+ * Insert (or merge into) the dedup map for a server whose source is a
+ * published npm package. Deduped by the full package spec (`npm:<package>`),
+ * so two recipes referencing the same `@scope/pkg@version` collapse onto one
+ * `npm install -g` while distinct versions stay separate. No git URL, ref, or
+ * in-container path — the package is installed globally in the runtime stage.
+ */
+function addNpmRegistrySource(
+  byKey: Map<string, McpSource>,
+  source: RecipeMcpServerNpmSource,
+  ref: SourceRef,
+): void {
+  const key = `npm:${source.npm}`;
+  const existing = byKey.get(key);
+  if (existing) {
+    existing.refs.push(ref);
+    return;
+  }
+  byKey.set(key, {
+    key,
+    url: '',
+    ref: '',
+    install: { kind: 'npm-global', package: source.npm },
+    inContainerPath: '',
+    refs: [ref],
+  });
 }
 
 /**

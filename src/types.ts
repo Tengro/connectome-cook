@@ -25,6 +25,13 @@ export type InstallPattern =
   | { kind: 'npm' }
   | { kind: 'pip-editable' }
   | { kind: 'custom'; run: string; runtime: 'node' | 'python3' | 'custom' | 'bun' }
+  /** Install a published npm package globally (`npm install -g <package>`) at
+   *  image build time. Unlike the git-clone kinds this has no `inContainerPath`
+   *  and no builder stage — it runs in the runtime stage so the recipe's
+   *  `npx -y <package>` command resolves it offline, closing the cold-boot
+   *  fetch race. `package` is the full spec incl. version (e.g.
+   *  `@professional-wiki/mediawiki-mcp-server@0.12.0`). */
+  | { kind: 'npm-global'; package: string }
   /** Operator must supply a sibling checkout at build time; used when a
    *  recipe's MCP server has no `source` block and we're not in `--strict`. */
   | { kind: 'sibling-copy'; siblingDir: string };

@@ -282,6 +282,53 @@ describe('generateDockerfile — sibling-copy source', () => {
   });
 });
 
+describe('generateDockerfile — npm-global registry source', () => {
+  test('bakes the package via npm install -g in the runtime stage, no builder stage', () => {
+    const recipe: Recipe = {
+      name: 'npm-registry-test',
+      agent: { systemPrompt: 'p' },
+      mcpServers: {
+        mediawiki: {
+          command: 'npx',
+          args: ['-y', '@professional-wiki/mediawiki-mcp-server@0.12.0'],
+          source: { npm: '@professional-wiki/mediawiki-mcp-server@0.12.0' },
+        },
+      },
+    } as Recipe;
+    const walks: WalkResult[] = [{ path: '/recipes/mw.json', recipe }];
+    const sources = detectSources(walks, { strict: true });
+
+    // Detector produced exactly one npm-global source.
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.install).toEqual({
+      kind: 'npm-global',
+      package: '@professional-wiki/mediawiki-mcp-server@0.12.0',
+    });
+
+    const dockerfile = generateDockerfile({
+      walks,
+      sources,
+      envVars: [],
+      options: defaultOptions(),
+    });
+
+    // Runtime stage installs the package globally (quoted spec).
+    expect(dockerfile).toContain(
+      "RUN npm install -g --no-audit --no-fund '@professional-wiki/mediawiki-mcp-server@0.12.0'",
+    );
+
+    // node/npm are pulled in even though no recipe spawns `node`/`npm`/`npx`
+    // … actually the command IS npx, but registry sources force node anyway.
+    expect(dockerfile).toContain('AS node-runtime');
+
+    // No builder stage and no cross-stage COPY for a registry package.
+    expect(dockerfile).not.toMatch(/AS\s+\S*mediawiki\S*-build/);
+    expect(dockerfile).not.toContain('--from=mediawiki');
+    // ch-deps is always present.
+    expect(dockerfile).toContain('AS ch-deps');
+  });
+});
+
 describe('generateDockerfile — webui module gates dist/ COPY', () => {
   test('does not emit dist/ COPY when no recipe enables webui', () => {
     const recipe: Recipe = {

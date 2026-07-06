@@ -64,6 +64,43 @@ describe('cook build against the Triumvirate example', () => {
     expect(existsSync(join(outDir, 'recipes/clerk.json'))).toBe(true);
   });
 
+  test('emitted recipes demote build-only source to sourceMeta (provenance kept, validator not tripped)', () => {
+    type Srv = { command?: string; args?: string[]; source?: unknown; sourceMeta?: unknown };
+    const load = (recipePath: string): Record<string, Srv> => {
+      const r = JSON.parse(readFileSync(recipePath, 'utf-8')) as {
+        mcpServers?: Record<string, Srv>;
+      };
+      return r.mcpServers ?? {};
+    };
+    const count = (servers: Record<string, Srv>, key: 'source' | 'sourceMeta'): number =>
+      Object.values(servers).filter((s) => s[key] !== undefined).length;
+
+    // The example knowledge-miner ships a git `source` on its zulip server…
+    const originalServers = load(join(REPO_ROOT, 'examples/triumvirate/recipes/knowledge-miner.json'));
+    expect(count(originalServers, 'source')).toBeGreaterThan(0);
+
+    for (const name of ['triumvirate', 'knowledge-miner', 'knowledge-reviewer', 'clerk']) {
+      const emitted = load(join(outDir, `recipes/${name}.json`));
+      // No emitted recipe may retain the validated `source` key…
+      expect(count(emitted, 'source')).toBe(0);
+    }
+
+    // …but the miner's provenance survives under `sourceMeta`, byte-for-byte,
+    // and its runtime fields are untouched.
+    const emittedMiner = load(join(outDir, 'recipes/knowledge-miner.json'));
+    expect(count(emittedMiner, 'sourceMeta')).toBe(count(originalServers, 'source'));
+    for (const [name, orig] of Object.entries(originalServers)) {
+      if (orig.source !== undefined) {
+        // Provenance preserved verbatim (demote does not touch the block)…
+        expect(emittedMiner[name]!.sourceMeta).toEqual(orig.source);
+        // …and runtime fields survive (command may be overlay-rewritten from a
+        // relative to an in-container absolute path, so assert presence, not equality).
+        expect(typeof emittedMiner[name]!.command).toBe('string');
+        expect(emittedMiner[name]!.command).toBeTruthy();
+      }
+    }
+  });
+
   test('Dockerfile is multi-stage with the expected stages', () => {
     const dockerfile = readFileSync(join(outDir, 'Dockerfile'), 'utf-8');
     expect(dockerfile).toStartWith('# syntax=docker/dockerfile:1.7');
