@@ -3,8 +3,8 @@
  *
  * Written by every backend next to its output; consumed by `cook run`
  * (launch the materialized artifact without re-resolving) and by repeat
- * installs (idempotent reconcile: a component whose url+ref+commit match
- * the lock is skipped, not re-cloned).
+ * installs (idempotent reconcile: a component whose url+ref+install match
+ * the lock — and whose target directory exists — is skipped, not re-cloned).
  *
  * Secrets never land here — values live in the backend's .env. The lock
  * records WHAT was materialized (components, commits, paths, answered

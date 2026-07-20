@@ -1,8 +1,7 @@
 import mri from 'mri';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { log } from './log.js';
@@ -229,30 +228,40 @@ Build flags are the same as ${log.bold('cook build')}.  Anything after \`--\` go
 \`docker compose up\` (docker) or the launcher script (host) — e.g. \`-- -d\`.
 `;
 
-/** Launch a materialized dir per its lockfile: compose or launcher script. */
+/** Launch a materialized dir per its lockfile: compose or launcher script.
+ *  Always launches in the directory the lock was FOUND in — the recorded
+ *  launch.dir is a build-time hint that goes stale when the operator moves
+ *  or copies the output dir, and launching a different deployment than the
+ *  one explicitly named would be silently wrong. */
 function launchFromLock(dir: string, passthroughArgs: string[]): Promise<number> {
-  const lock = readLockfile(dir);
+  let lock;
+  try {
+    lock = readLockfile(dir);
+  } catch (err) {
+    log.error(`${dir}: unreadable ${LOCKFILE_NAME}: ${err instanceof Error ? err.message : String(err)}`);
+    return Promise.resolve(1);
+  }
   if (!lock) {
     log.error(`${dir}: no ${LOCKFILE_NAME} — nothing to launch`);
     return Promise.resolve(1);
   }
   let command: string;
   let args: string[];
-  let cwd: string;
+  const cwd = dir;
   if (lock.launch.kind === 'compose') {
+    if (!existsSync(join(cwd, 'docker-compose.yml'))) {
+      log.error(`${cwd}: lock says docker backend but no docker-compose.yml here — re-run \`cook build\``);
+      return Promise.resolve(1);
+    }
     command = 'docker';
     args = passthroughArgs.length > 0
       ? ['compose', 'up', ...passthroughArgs]
       : ['compose', 'up', '--build'];
-    cwd = lock.launch.dir;
-    // The lock may have been produced on another checkout of the same
-    // artifacts — prefer the directory we actually found the lock in.
-    if (!existsSync(join(cwd, 'docker-compose.yml'))) cwd = dir;
     log.step(`docker compose up in ${log.dim(cwd)}`);
   } else {
-    command = existsSync(lock.launch.script) ? lock.launch.script : join(dir, 'run.sh');
+    const localScript = join(dir, 'run.sh');
+    command = existsSync(localScript) ? localScript : lock.launch.script;
     args = passthroughArgs;
-    cwd = dir;
     log.step(`launching ${log.dim(command)}`);
   }
   return new Promise<number>((resolveExit) => {
@@ -298,11 +307,25 @@ async function handleRun(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // Parse with the FULL build flag spec plus --rebuild so a flag like
+  // `--strict` before the recipe path can't swallow it as its value (mri
+  // treats unknown flags greedily otherwise) and the positional target is
+  // found regardless of flag order.
   const runFlags = mri(buildArgs, {
-    boolean: ['rebuild'],
-    string: ['out'],
+    boolean: ['rebuild', 'help', 'strict', 'pin-refs', 'allow-incomplete-templates'],
+    string: ['out', 'env-file', 'image-name'],
+    alias: { h: 'help' },
   });
   const [target] = runFlags._ as string[];
+
+  // Build-affecting flags mean the operator wants a fresh materialization —
+  // launching a stale dir while silently ignoring them would be wrong.
+  const wantsFreshBuild = runFlags.rebuild
+    || !!runFlags.strict
+    || !!runFlags['allow-incomplete-templates']
+    || runFlags['env-file'] !== undefined
+    || runFlags['image-name'] !== undefined
+    || runFlags.prompts === false;
 
   // 1. Materialized dir named directly.
   if (target && existsSync(join(target, LOCKFILE_NAME))) {
@@ -310,7 +333,7 @@ async function handleRun(argv: string[]): Promise<number> {
   }
 
   // 2. Recipe with an existing materialization — launch without re-resolving.
-  if (target && !runFlags.rebuild) {
+  if (target && !wantsFreshBuild) {
     const found = await findMaterialization(target, runFlags.out);
     if (found) {
       log.info(`found existing materialization ${log.dim(found)} (use --rebuild to re-cook)`);

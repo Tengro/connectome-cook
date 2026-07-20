@@ -160,4 +160,11 @@ describe('detectExtensions — absolute source-less paths', () => {
       host: { kind: 'module', path: '/opt/host-ext/index.ts' },
     })], { strict: true })).toThrow(/cannot be baked into the image \(strict mode\)/);
   });
+
+  test('errors when a name is unbaked in one recipe but baked in another', () => {
+    expect(() => detectExtensions([
+      walk(join(dir, 'a.json'), { x: { kind: 'module', path: '/opt/x/index.ts' } }),
+      walk(join(dir, 'b.json'), { x: { kind: 'module', path: 'i.ts', source: { url: 'https://g/x.git' } } }),
+    ], { strict: false })).toThrow(/absolute unbaked path in one recipe and a baked/);
+  });
 });

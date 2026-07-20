@@ -23,15 +23,18 @@
  * explicitly confirmed before anything runs. Non-interactive runs require
  * --yes; --no-prompts alone refuses.
  *
- * Idempotent reconcile: a component whose url+ref+commit match the existing
+ * Idempotent reconcile: a component whose url+ref+install match the existing
  * lockfile AND whose target directory exists is skipped. Everything else is
- * re-cloned fresh (rm -rf + clone). Local extensions are never copied — the
- * configuration points at the operator's own directory.
+ * re-cloned fresh (rm -rf + clone); a failed build removes its target so a
+ * half-built checkout can never satisfy a later reconcile. Local extensions
+ * are never copied — the configuration points at the operator's own
+ * directory. Sibling-copy sources ARE copied (recipe-adjacent checkout →
+ * installDir), mirroring the docker COPY.
  */
 
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import promptsLib from 'prompts';
 import { log } from '../log.js';
 import type { GeneratorInput, McpSource } from '../types.js';
@@ -39,7 +42,7 @@ import type { Recipe } from '../vendor/recipe.js';
 import type { InstallPlan } from '../plan.js';
 import { generateOverlays } from '../generators/overlay.js';
 import { lowerToConfiguration, recipeFilename } from '../configuration.js';
-import { hostFilename, serializeCredentialFile } from '../credentials.js';
+import { serializeCredentialFile } from '../credentials.js';
 import {
   LOCKFILE_NAME,
   readLockfile,
@@ -81,9 +84,20 @@ export interface CloneAction {
   sslBypass?: boolean;
 }
 
+export interface CopyAction {
+  key: string;
+  /** Recipe-adjacent checkout to copy from (may not exist yet — checked at
+   *  execution with a clear error). */
+  from: string;
+  target: string;
+}
+
 export interface HostActions {
   clones: CloneAction[];
-  /** Sources cook skips on host with a reason (npm-global, sibling-copy). */
+  /** Sibling-copy sources: recipe-adjacent checkout → installDir (mirrors
+   *  the docker COPY of an operator-supplied checkout). */
+  copies: CopyAction[];
+  /** Sources cook skips on host with a reason (npm-global). */
   skipped: Array<{ key: string; reason: string }>;
   /** Extension name → in-place host entry path (local extensions). */
   localExtensionPaths: Map<string, string>;
@@ -113,6 +127,7 @@ export function hostBuildCommand(source: McpSource): string {
 /** Compute every action the host install would take. Pure. */
 export function planHostActions(plan: InstallPlan, options: HostBackendOptions): HostActions {
   const clones: CloneAction[] = [];
+  const copies: CopyAction[] = [];
   const skipped: HostActions['skipped'] = [];
 
   clones.push({
@@ -133,9 +148,14 @@ export function planHostActions(plan: InstallPlan, options: HostBackendOptions):
       continue;
     }
     if (source.install.kind === 'sibling-copy') {
-      skipped.push({
+      // Mirror the docker COPY: the operator keeps a checkout next to the
+      // recipe; we copy it under the install dir so the (rebased) overlay
+      // paths in the configuration actually exist at runtime.
+      const declaringRecipe = source.refs[0]?.recipePath ?? plan.recipePath;
+      copies.push({
         key: source.key,
-        reason: 'sibling-copy source — place/keep the checkout next to the recipe; the configuration references it as written',
+        from: join(dirname(declaringRecipe), source.install.siblingDir),
+        target: hostPathFor(options.installDir, source.inContainerPath),
       });
       continue;
     }
@@ -158,7 +178,7 @@ export function planHostActions(plan: InstallPlan, options: HostBackendOptions):
     localExtensionPaths.set(ext.name, join(ext.hostDir, ext.entryBasename));
   }
 
-  return { clones, skipped, localExtensionPaths };
+  return { clones, copies, skipped, localExtensionPaths };
 }
 
 /** Render the confirm-gate preview. Pure (string). */
@@ -172,6 +192,9 @@ export function renderActionPreview(actions: HostActions, options: HostBackendOp
     lines.push(`  - ${c.url}${refLabel} → ${c.target}`);
     if (c.buildCommand) lines.push(`      then run: ${c.buildCommand}`);
     if (c.authSecret) lines.push(`      (private clone: token from $${c.authSecret})`);
+  }
+  for (const c of actions.copies) {
+    lines.push(`  - COPY ${c.from} → ${c.target} (sibling checkout)`);
   }
   for (const s of actions.skipped) {
     lines.push(`  - SKIP ${s.key}: ${s.reason}`);
@@ -193,7 +216,9 @@ export function renderActionPreview(actions: HostActions, options: HostBackendOp
 // ---------------------------------------------------------------------------
 
 /** True when the existing lock says this clone is already materialized at
- *  the same url+ref and the target exists — skip it. */
+ *  the same url+ref+install and the target exists — skip it. A component
+ *  whose build failed never reaches the lock (and its target is removed on
+ *  failure), so a half-built checkout cannot satisfy this check. */
 function isSatisfiedByLock(
   action: CloneAction,
   lock: Lockfile | null,
@@ -203,31 +228,45 @@ function isSatisfiedByLock(
     return lock.connectomeHost.url === action.url && lock.connectomeHost.ref === action.ref;
   }
   const entry = lock.components.find((c) => c.key === action.key);
-  return !!entry && entry.url === action.url && entry.ref === action.ref;
+  return !!entry
+    && entry.url === action.url
+    && entry.ref === action.ref
+    && entry.install === (action.buildCommand || 'clone-only');
 }
 
-/** Clone URL with optional token from the environment (never logged). */
-function cloneUrlFor(action: CloneAction): string {
+/** Clone URL with an optional token (resolved values > environment; never
+ *  logged). The credentialed form is briefly visible in the process list
+ *  during the clone; executeClone scrubs it from .git/config afterwards. */
+function cloneUrlFor(action: CloneAction, values: Record<string, string>): string {
   if (!action.authSecret) return action.url;
-  const token = process.env[action.authSecret];
+  const token = values[action.authSecret] ?? process.env[action.authSecret];
   if (!token) {
     throw new Error(
-      `clone of ${action.url} needs $${action.authSecret} in the environment (declared authSecret)`,
+      `clone of ${action.url} needs a value for ${action.authSecret} ` +
+      `(supply via prompt, --env-file, or the environment)`,
     );
   }
   return action.url.replace(/^https?:\/\//, (m) => `${m}oauth2:${token}@`);
 }
 
-/** Execute one clone+build action. Throws on failure. */
-function executeClone(action: CloneAction): { commit?: string } {
+/** Execute one clone+build action. Throws on failure; the caller removes
+ *  the target on failure so no half-built checkout survives. */
+function executeClone(action: CloneAction, values: Record<string, string>): { commit?: string } {
   rmSync(action.target, { recursive: true, force: true });
   mkdirSync(resolve(action.target, '..'), { recursive: true });
 
   const sslArgs = action.sslBypass ? ['-c', 'http.sslVerify=false'] : [];
   log.step(`cloning ${log.dim(action.url)}${action.ref !== 'main' ? `@${action.ref}` : ''} → ${log.dim(action.target)}`);
-  execFileSync('git', [...sslArgs, 'clone', cloneUrlFor(action), action.target], {
+  execFileSync('git', [...sslArgs, 'clone', cloneUrlFor(action, values), action.target], {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
+  if (action.authSecret) {
+    // Scrub the token from .git/config — the credentialed URL must not
+    // persist on disk (backups, shared machines, later `git fetch`).
+    execFileSync('git', ['remote', 'set-url', 'origin', action.url], {
+      cwd: action.target, stdio: ['ignore', 'inherit', 'inherit'],
+    });
+  }
   if (action.ref && action.ref !== 'main') {
     if (action.ref.startsWith('refs/')) {
       execFileSync('git', ['fetch', 'origin', `${action.ref}:cook-install-checkout`], {
@@ -284,7 +323,7 @@ function renderLauncher(parentRecipeBasename: string): string {
     'export DATA_DIR="${DATA_DIR:-$PWD/data}"',
     'mkdir -p "$DATA_DIR"',
     'cd app',
-    `exec bun src/index.ts ../recipes/${parentRecipeBasename} "$@"`,
+    `exec bun src/index.ts "../recipes/${parentRecipeBasename}" "$@"`,
     '',
   ].join('\n');
 }
@@ -295,8 +334,34 @@ export async function runHostBackend(
   options: HostBackendOptions,
 ): Promise<BuildResult> {
   const installDir = options.installDir;
+
+  // Fail fast on recipe features the host backend cannot materialize yet.
+  // Sidecar services / rendered container templates are compose concepts;
+  // silently dropping them would ship a stack missing its database with no
+  // warning (the docker backend renders all of these).
+  const parent = plan.parentWalk.recipe;
+  if ((parent.services ?? []).length > 0) {
+    log.error(
+      `recipe declares ${parent.services!.length} sidecar service(s) — the host backend cannot ` +
+      `materialize sidecars (yet). Use \`cook build\` (docker) for this recipe.`,
+    );
+    return { exitCode: 2, outDir: installDir };
+  }
+  if ((parent.containerTemplateFiles ?? []).length > 0) {
+    log.error(
+      `recipe declares containerTemplateFiles — the host backend does not render container ` +
+      `templates (yet). Use \`cook build\` (docker) for this recipe.`,
+    );
+    return { exitCode: 2, outDir: installDir };
+  }
+
   const actions = planHostActions(plan, options);
-  const existingLock = readLockfile(installDir);
+  let existingLock: Lockfile | null = null;
+  try {
+    existingLock = readLockfile(installDir);
+  } catch (err) {
+    log.warn(`existing ${LOCKFILE_NAME} unreadable (${err instanceof Error ? err.message : String(err)}) — treating as fresh install`);
+  }
 
   // ---- Confirm gate: commands run on the operator's machine. ----
   process.stdout.write(renderActionPreview(actions, options) + '\n\n');
@@ -333,11 +398,14 @@ export async function runHostBackend(
         : existingLock!.components.find((c) => c.key === action.key)?.commit;
     } else {
       try {
-        commit = executeClone(action).commit;
+        commit = executeClone(action, plan.values).commit;
       } catch (err) {
         log.error(
           `install of ${action.key} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
+        // Remove the partial checkout so a later re-run re-clones instead
+        // of a stale lock entry + existing dir passing the reconcile check.
+        rmSync(action.target, { recursive: true, force: true });
         return { exitCode: 3, outDir: installDir };
       }
     }
@@ -356,11 +424,38 @@ export async function runHostBackend(
     }
   }
 
+  // ---- Sibling copies (docker's context-COPY equivalent). ----
+  for (const copy of actions.copies) {
+    if (!existsSync(copy.from)) {
+      log.error(
+        `sibling checkout not found: ${copy.from} — place the checkout next to the recipe ` +
+        `(same requirement as docker's sibling-copy) and re-run`,
+      );
+      return { exitCode: 2, outDir: installDir };
+    }
+    log.step(`copying sibling checkout ${log.dim(copy.from)} → ${log.dim(copy.target)}`);
+    rmSync(copy.target, { recursive: true, force: true });
+    cpSync(copy.from, copy.target, {
+      recursive: true,
+      filter: (src) => basename(src) !== '.git',
+    });
+    lockedComponents.push({
+      key: copy.key,
+      role: 'mcp',
+      url: '',
+      ref: '',
+      path: copy.target,
+      install: 'sibling-copy',
+    });
+  }
+
   // ---- Lower configurations with host-rebased overlays. ----
   // The overlay machinery reasons in `inContainerPath` terms; rebasing each
   // source's path onto the install dir makes it emit host-absolute paths.
+  // Sibling-copy sources are included — their checkouts were copied above,
+  // so args must be rewritten to the install-dir paths just like in docker.
   const rebasedSources = plan.sources
-    .filter((s) => s.install.kind !== 'npm-global' && s.install.kind !== 'sibling-copy')
+    .filter((s) => s.install.kind !== 'npm-global')
     .map((s) => ({ ...s, inContainerPath: hostPathFor(installDir, s.inContainerPath) }));
   const rebasedLocalExts = plan.localExtensions.map((ext) => ({
     ...ext,
@@ -398,6 +493,10 @@ export async function runHostBackend(
     }
 
     // Credential files (complete ones only — mirrors the docker backend).
+    // The runtime resolves the recipe-declared path against its CWD, which
+    // run.sh sets to <installDir>/app — so relative paths are written there
+    // (docker gets the same effect from a bind mount at the declared path).
+    // Absolute declared paths are never written outside the install dir.
     for (const cf of plan.credentialFiles) {
       const values = plan.credentialValues[cf.path] ?? {};
       if (Object.keys(values).length !== cf.fields.length) {
@@ -406,8 +505,21 @@ export async function runHostBackend(
         }
         continue;
       }
+      if (cf.path.startsWith('/')) {
+        log.warn(
+          `${cf.path}: absolute credential-file path — cook won't write outside the install dir; ` +
+          `hand-place the file at that path before launching`,
+        );
+        continue;
+      }
+      const target = resolve(join(installDir, 'app'), cf.path);
+      if (target !== resolve(installDir, 'app') && !target.startsWith(resolve(installDir, 'app') + '/')) {
+        log.warn(`${cf.path}: resolves outside the install dir — skipped; hand-place it before launching`);
+        continue;
+      }
       const mode = cf.mode ? parseInt(cf.mode, 8) : 0o600;
-      writeFileSync(join(installDir, hostFilename(cf)), serializeCredentialFile(cf, values), { mode });
+      mkdirSync(resolve(target, '..'), { recursive: true });
+      writeFileSync(target, serializeCredentialFile(cf, values), { mode });
     }
 
     if (Object.keys(plan.values).length > 0) {

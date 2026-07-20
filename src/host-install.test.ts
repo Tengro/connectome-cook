@@ -108,16 +108,27 @@ describe('planHostActions', () => {
     expect(actions.clones[1]!.target).toBe(join(OPTIONS.installDir, 'zulip_mcp'));
   });
 
-  test('skips npm-global and sibling-copy sources with reasons', () => {
+  test('skips npm-global with a reason; sibling-copy becomes a recipe-adjacent copy', () => {
     const plan = minimalPlan({
       sources: [
         mcpSource({ key: 'npm:pkg@1', url: '', install: { kind: 'npm-global', package: 'pkg@1' }, inContainerPath: '' }),
-        mcpSource({ key: 'sibling:x', url: '', install: { kind: 'sibling-copy', siblingDir: 'x' }, inContainerPath: '/x' }),
+        mcpSource({
+          key: 'sibling:x',
+          url: '',
+          install: { kind: 'sibling-copy', siblingDir: 'x' },
+          inContainerPath: '/x',
+          refs: [{ recipePath: '/home/op/proj/r.json', mcpServerName: 'x' }],
+        }),
       ],
     });
     const actions = planHostActions(plan, OPTIONS);
     expect(actions.clones.length).toBe(1); // connectome-host only
-    expect(actions.skipped.map((s) => s.key)).toEqual(['npm:pkg@1', 'sibling:x']);
+    expect(actions.skipped.map((s) => s.key)).toEqual(['npm:pkg@1']);
+    expect(actions.copies).toEqual([{
+      key: 'sibling:x',
+      from: '/home/op/proj/x',
+      target: join(OPTIONS.installDir, 'x'),
+    }]);
   });
 
   test('local extensions are used in place', () => {

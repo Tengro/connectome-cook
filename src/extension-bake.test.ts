@@ -126,6 +126,18 @@ describe('generateOverlays with extensions', () => {
     expect(generateOverlays(input).size).toBe(0);
   });
 
+  test('never rewrites an absolute source-less path even when a same-named target exists', () => {
+    // The detector errors on this mix at build time; the overlay guard keeps
+    // the invariant independently (defense in depth for direct callers).
+    const input: GeneratorInput = {
+      walks: [walkWith({ zk: { kind: 'module', path: '/opt/zk/index.ts' } })],
+      sources: [gitExt('zk', 'src/index.ts')],
+      envVars: [],
+      options: OPTIONS,
+    };
+    expect(generateOverlays(input).size).toBe(0);
+  });
+
   test('no overlay when the recipe already points at the baked path', () => {
     const input: GeneratorInput = {
       walks: [walkWith({ zk: { kind: 'strategy', path: '/app/extensions/zk/src/index.ts' } })],

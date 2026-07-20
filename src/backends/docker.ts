@@ -426,11 +426,19 @@ export async function runDockerBackend(
     for (const ext of localExtensions) {
       const target = join(outDir, 'extensions', ext.name);
       rmSync(target, { recursive: true, force: true });
+      // Guard against hostDir containing outDir (entry file next to the
+      // recipe in cwd + default ./<slug>-cook): copying a directory into
+      // its own subtree throws, and even elsewhere, generated .env/secret
+      // files must never be swept into the build context.
+      const resolvedOutDir = resolve(outDir);
       cpSync(ext.hostDir, target, {
         recursive: true,
         filter: (src) => {
           const base = basename(src);
-          return base !== 'node_modules' && base !== '.git';
+          if (base === 'node_modules' || base === '.git') return false;
+          const resolvedSrc = resolve(src);
+          return resolvedSrc !== resolvedOutDir
+            && !resolvedSrc.startsWith(resolvedOutDir + sep);
         },
       });
     }

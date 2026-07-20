@@ -123,7 +123,9 @@ export async function resolveRequirements(
       continue;
     }
 
-    const hit = firstProbeHit(req.probe);
+    // Probe expansion sees env-file values too — `$SPRING_HOME/engine`
+    // should work whether SPRING_HOME comes from the shell or --env-file.
+    const hit = firstProbeHit(req.probe, { ...process.env, ...opts.envFileValues });
     if (opts.noPrompts) {
       if (hit !== undefined) {
         log.info(`requirement ${log.bold(name)}: probed ${log.dim(hit)} → ${envName}`);

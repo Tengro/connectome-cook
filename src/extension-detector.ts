@@ -93,6 +93,7 @@ export function detectExtensions(
   const localByName = new Map<string, LocalExtension>();
   /** Entries cook cannot bake: absolute path without source. */
   const unbakeable: Array<{ recipePath: string; name: string; path: string }> = [];
+  const unbakeableNames = new Set<string>();
   const errors: string[] = [];
 
   for (const walk of walks) {
@@ -110,6 +111,7 @@ export function detectExtensions(
 
       if (isAbsolute(ext.path)) {
         unbakeable.push({ recipePath: walk.path, name, path: ext.path });
+        unbakeableNames.add(name);
         continue;
       }
 
@@ -122,6 +124,19 @@ export function detectExtensions(
       }
 
       addLocalExtension(localByName, gitByName, walk.path, name, ext, ref, errors);
+    }
+  }
+
+  // A name that is unbakeable in one recipe but baked (git/local) in
+  // another is a conflict, not two independent declarations — the overlay
+  // is keyed by name, so the baked rewrite would silently clobber the
+  // absolute path the operator was told stays untouched.
+  for (const name of unbakeableNames) {
+    if (gitByName.has(name) || localByName.has(name)) {
+      errors.push(
+        `extension "${name}" is declared with an absolute unbaked path in one recipe and a ` +
+        `baked (source/relative) form in another — pick one acquisition mode across the fleet.`,
+      );
     }
   }
 
