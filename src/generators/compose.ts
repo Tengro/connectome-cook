@@ -491,93 +491,152 @@ function renderCompose(input: RenderInput): string {
   // top-level block.  Cook emits in declaration order from the recipe.
   for (const svc of sidecars) {
     lines.push('');
-    lines.push(`  ${svc.name}:`);
-    lines.push(`    image: ${svc.image}`);
-    lines.push(`    container_name: ${svc.name}`);
-    if (svc.restart) {
-      // Quote defensively — YAML parses bareword `no` as boolean false,
-      // which docker-compose rejects.  Quoting is harmless for the other
-      // valid values (`unless-stopped` / `always` / `on-failure`).
-      lines.push(`    restart: "${svc.restart}"`);
-    } else {
-      // Sensible default — operator probably wants sidecars to come back
-      // after a host reboot or transient crash.
-      lines.push('    restart: unless-stopped');
-    }
-    if (svc.dependsOn !== undefined) {
-      const isEmpty = Array.isArray(svc.dependsOn)
-        ? svc.dependsOn.length === 0
-        : Object.keys(svc.dependsOn).length === 0;
-      if (!isEmpty) {
-        lines.push('    depends_on:');
-        for (const dl of renderDependsOnLines(svc.dependsOn, '      ')) {
-          lines.push(dl);
-        }
-      }
-    }
-    if (svc.command && svc.command.length > 0) {
-      // Override the image's default CMD.  JSON-array form so the entries
-      // are exec'd directly (no shell parsing), matching docker compose's
-      // long form.
-      lines.push(`    command: ${JSON.stringify(svc.command)}`);
-    }
-    if (svc.ports && svc.ports.length > 0) {
-      lines.push('    ports:');
-      for (const p of svc.ports) {
-        lines.push(`      - "${p}"`);
-      }
-    }
-    if (svc.environment && Object.keys(svc.environment).length > 0) {
-      lines.push('    environment:');
-      for (const [k, v] of Object.entries(svc.environment)) {
-        // Quote values defensively — docker-compose's env interpretation
-        // is happy with quoted strings, and this avoids surprises with
-        // values that look like YAML special tokens (yes/no/null/...).
-        lines.push(`      ${k}: ${quoteForComposeEnvBlock(v)}`);
-      }
-    }
-    if (svc.volumes && svc.volumes.length > 0) {
-      lines.push('    volumes:');
-      for (const v of svc.volumes) {
-        const suffix = v.readOnly ? ':ro' : '';
-        lines.push(`      - ${v.source}:${v.target}${suffix}`);
-      }
-    }
-    if (svc.secrets && svc.secrets.length > 0) {
-      lines.push('    secrets:');
-      for (const sec of svc.secrets) {
-        lines.push(`      - ${sec}`);
-      }
-    }
-    if (svc.healthcheck) {
-      const hc = svc.healthcheck;
-      lines.push('    healthcheck:');
-      const testStr = JSON.stringify(hc.test);
-      lines.push(`      test: ${testStr}`);
-      if (hc.interval) lines.push(`      interval: ${hc.interval}`);
-      if (hc.timeout) lines.push(`      timeout: ${hc.timeout}`);
-      if (hc.retries !== undefined) lines.push(`      retries: ${hc.retries}`);
-      if (hc.startPeriod) lines.push(`      start_period: ${hc.startPeriod}`);
-    }
-    if (svc.stopGracePeriod) {
-      lines.push(`    stop_grace_period: ${svc.stopGracePeriod}`);
-    }
+    lines.push(...renderSidecarServiceLines(svc));
   }
 
-  if (allSecretNames.length > 0) {
-    lines.push('');
-    lines.push('# Secrets are populated from files of the same name in the cook output');
-    lines.push('# directory. Cook auto-writes each file (mode 0600) from collected env');
-    lines.push('# values; operator can override by editing/replacing the file before');
-    lines.push('# `docker compose build` (build-time secrets) or `up` (runtime secrets).');
-    lines.push('secrets:');
-    for (const name of allSecretNames) {
-      lines.push(`  ${name}:`);
-      lines.push(`    file: ./${name}`);
-    }
-  }
+  lines.push(...renderSecretsBlock(allSecretNames));
 
   // Trailing newline so editors don't complain.
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** Render one sidecar's service entry (shared between the full compose and
+ *  the host backend's sidecars-only compose). */
+export function renderSidecarServiceLines(
+  svc: import('../vendor/recipe.js').RecipeSidecarService,
+): string[] {
+  const lines: string[] = [];
+  lines.push(`  ${svc.name}:`);
+  lines.push(`    image: ${svc.image}`);
+  lines.push(`    container_name: ${svc.name}`);
+  if (svc.restart) {
+    // Quote defensively — YAML parses bareword `no` as boolean false,
+    // which docker-compose rejects.  Quoting is harmless for the other
+    // valid values (`unless-stopped` / `always` / `on-failure`).
+    lines.push(`    restart: "${svc.restart}"`);
+  } else {
+    // Sensible default — operator probably wants sidecars to come back
+    // after a host reboot or transient crash.
+    lines.push('    restart: unless-stopped');
+  }
+  if (svc.dependsOn !== undefined) {
+    const isEmpty = Array.isArray(svc.dependsOn)
+      ? svc.dependsOn.length === 0
+      : Object.keys(svc.dependsOn).length === 0;
+    if (!isEmpty) {
+      lines.push('    depends_on:');
+      for (const dl of renderDependsOnLines(svc.dependsOn, '      ')) {
+        lines.push(dl);
+      }
+    }
+  }
+  if (svc.command && svc.command.length > 0) {
+    // Override the image's default CMD.  JSON-array form so the entries
+    // are exec'd directly (no shell parsing), matching docker compose's
+    // long form.
+    lines.push(`    command: ${JSON.stringify(svc.command)}`);
+  }
+  if (svc.ports && svc.ports.length > 0) {
+    lines.push('    ports:');
+    for (const p of svc.ports) {
+      lines.push(`      - "${p}"`);
+    }
+  }
+  if (svc.environment && Object.keys(svc.environment).length > 0) {
+    lines.push('    environment:');
+    for (const [k, v] of Object.entries(svc.environment)) {
+      // Quote values defensively — docker-compose's env interpretation
+      // is happy with quoted strings, and this avoids surprises with
+      // values that look like YAML special tokens (yes/no/null/...).
+      lines.push(`      ${k}: ${quoteForComposeEnvBlock(v)}`);
+    }
+  }
+  if (svc.volumes && svc.volumes.length > 0) {
+    lines.push('    volumes:');
+    for (const v of svc.volumes) {
+      const suffix = v.readOnly ? ':ro' : '';
+      lines.push(`      - ${v.source}:${v.target}${suffix}`);
+    }
+  }
+  if (svc.secrets && svc.secrets.length > 0) {
+    lines.push('    secrets:');
+    for (const sec of svc.secrets) {
+      lines.push(`      - ${sec}`);
+    }
+  }
+  if (svc.healthcheck) {
+    const hc = svc.healthcheck;
+    lines.push('    healthcheck:');
+    const testStr = JSON.stringify(hc.test);
+    lines.push(`      test: ${testStr}`);
+    if (hc.interval) lines.push(`      interval: ${hc.interval}`);
+    if (hc.timeout) lines.push(`      timeout: ${hc.timeout}`);
+    if (hc.retries !== undefined) lines.push(`      retries: ${hc.retries}`);
+    if (hc.startPeriod) lines.push(`      start_period: ${hc.startPeriod}`);
+  }
+  if (svc.stopGracePeriod) {
+    lines.push(`    stop_grace_period: ${svc.stopGracePeriod}`);
+  }
+  return lines;
+}
+
+/** Render the top-level `secrets:` block (shared with the sidecars-only
+ *  compose).  Empty array when there are no secrets. */
+export function renderSecretsBlock(secretNames: string[]): string[] {
+  if (secretNames.length === 0) return [];
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('# Secrets are populated from files of the same name in the cook output');
+  lines.push('# directory. Cook auto-writes each file (mode 0600) from collected env');
+  lines.push('# values; operator can override by editing/replacing the file before');
+  lines.push('# `docker compose build` (build-time secrets) or `up` (runtime secrets).');
+  lines.push('secrets:');
+  for (const name of secretNames) {
+    lines.push(`  ${name}:`);
+    lines.push(`    file: ./${name}`);
+  }
+  return lines;
+}
+
+/**
+ * Sidecars-only compose file for the host backend: the agent process runs
+ * natively (run.sh), but declared sidecar services still run under docker —
+ * databases and wikis on bare metal are out of scope, and every operator
+ * machine cook targets already has docker for `cook build`.
+ *
+ * Returns null when the parent recipe declares no services.  Note the
+ * agent-level `containerDependsOn` has no service entry to hang off here;
+ * run.sh approximates it with `docker compose up -d --wait`, which blocks
+ * until services are running/healthy (and one-shot bootstrap services have
+ * exited successfully) before the agent launches.
+ */
+export function generateSidecarCompose(input: GeneratorInput): string | null {
+  const parent = input.walks[0];
+  if (!parent) return null;
+  const sidecars = parent.recipe.services ?? [];
+  if (sidecars.length === 0) return null;
+
+  const secretNames: string[] = [];
+  for (const svc of sidecars) {
+    for (const name of svc.secrets ?? []) {
+      if (!secretNames.includes(name)) secretNames.push(name);
+    }
+  }
+
+  const lines: string[] = [];
+  lines.push('# Generated by connectome-cook (host backend) — sidecar services only.');
+  lines.push('# The agent process runs natively via run.sh, which brings these up with');
+  lines.push('# `docker compose -f docker-compose.sidecars.yml up -d --wait` first.');
+  lines.push('# Reach sidecars from the agent via their PUBLISHED ports on localhost —');
+  lines.push('# compose service names only resolve inside the docker network.');
+  lines.push('');
+  lines.push('services:');
+  for (let i = 0; i < sidecars.length; i++) {
+    if (i > 0) lines.push('');
+    lines.push(...renderSidecarServiceLines(sidecars[i]!));
+  }
+  lines.push(...renderSecretsBlock(secretNames));
   lines.push('');
   return lines.join('\n');
 }

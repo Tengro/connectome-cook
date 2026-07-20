@@ -139,7 +139,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     sections.push(renderBuilderStage(source, stage));
   }
 
-  sections.push(renderChDepsStage());
+  sections.push(renderChDepsStage(options.pinnedChRef));
 
   sections.push(renderRuntimeStage({
     builderSources,
@@ -256,14 +256,16 @@ function renderBuilderStage(source: McpSource, stageName: string): string {
 // connectome-host bun-deps stage (auto-clone)
 // ---------------------------------------------------------------------------
 
-function renderChDepsStage(): string {
+function renderChDepsStage(pinnedChRef?: string): string {
   // We clone, then move the working tree to /app so the runtime stage can
   // COPY both `node_modules` and the source files out of /app.
+  // A --pin-refs SHA is baked as the CH_REF default; the operator can
+  // still override both args at `docker build` time.
   return [
     '# ---- ch-deps: clone connectome-host + install bun deps --------------------',
     `FROM ${BUN_BASE_IMAGE} AS ch-deps`,
     `ARG CH_REPO_URL=${DEFAULT_CH_REPO_URL}`,
-    `ARG CH_REF=${DEFAULT_CH_REF}`,
+    `ARG CH_REF=${pinnedChRef ?? DEFAULT_CH_REF}`,
     'RUN apt-get update \\',
     ' && apt-get install -y --no-install-recommends git ca-certificates \\',
     ' && rm -rf /var/lib/apt/lists/*',

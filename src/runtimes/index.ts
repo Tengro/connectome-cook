@@ -71,8 +71,14 @@ export function gitCloneCommand(source: McpSource, target: string): string {
 }
 
 /** Optional `&& cd <dir> && git checkout <ref>` tail.  Empty when ref is
- *  unset or "main".  Refspec form (`refs/...`) gets a fetch+checkout dance. */
+ *  unset or "main" (and unpinned).  Refspec form (`refs/...`) gets a
+ *  fetch+checkout dance.  A --pin-refs commit wins over the symbolic ref —
+ *  `git checkout <sha>` after a full clone reproduces the exact tree the
+ *  operator pinned. */
 export function gitCheckoutCommand(source: McpSource): string {
+  if (source.commit) {
+    return ` && git checkout ${source.commit}`;
+  }
   if (!source.ref || source.ref === 'main') return '';
   if (source.ref.startsWith('refs/')) {
     return ` && git fetch origin ${source.ref}:cook-build-checkout && git checkout cook-build-checkout`;
