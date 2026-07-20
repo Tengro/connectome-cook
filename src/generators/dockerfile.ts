@@ -61,6 +61,7 @@
 import { basename } from 'node:path';
 import type {
   GeneratorInput,
+  LocalExtension,
   McpSource,
   WalkResult,
 } from '../types.js';
@@ -83,6 +84,7 @@ const NODE_STAGE_ALIAS = 'node-runtime';
 /** Generate a complete multi-stage Dockerfile string for `input`. */
 export function generateDockerfile(input: GeneratorInput): string {
   const { walks, sources, options } = input;
+  const localExtensions = input.localExtensions ?? [];
   if (walks.length === 0) {
     throw new Error('generateDockerfile: walks is empty — need at least the parent recipe.');
   }
@@ -123,6 +125,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     builderSources,
     registrySources,
     siblingSources,
+    localExtensions,
     hasAnySecret,
   }));
 
@@ -141,6 +144,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     builderSources,
     registrySources,
     siblingSources,
+    localExtensions,
     stageNames,
     persistentDirs,
     needsNode,
@@ -164,11 +168,12 @@ interface HeaderArgs {
   builderSources: McpSource[];
   registrySources: McpSource[];
   siblingSources: McpSource[];
+  localExtensions: LocalExtension[];
   hasAnySecret: boolean;
 }
 
 function renderHeader(args: HeaderArgs): string {
-  const { imageName, parentRecipeBasename, builderSources, registrySources, siblingSources, hasAnySecret } = args;
+  const { imageName, parentRecipeBasename, builderSources, registrySources, siblingSources, localExtensions, hasAnySecret } = args;
   const lines: string[] = [];
   lines.push('# syntax=docker/dockerfile:1.7');
   lines.push('');
@@ -191,6 +196,9 @@ function renderHeader(args: HeaderArgs): string {
     if (source.install.kind === 'sibling-copy') {
       lines.push(`#   - sibling-copy: ${source.install.siblingDir} -> ${source.inContainerPath}`);
     }
+  }
+  for (const ext of localExtensions) {
+    lines.push(`#   - extension (local bundle): extensions/${ext.name} -> ${ext.inContainerPath}`);
   }
   lines.push('#   - ch-deps: clones connectome-host (override URL/ref via CH_REPO_URL / CH_REF build args)');
   lines.push('#   - runtime: assembles the final image (oven/bun:1-debian)');
@@ -276,6 +284,7 @@ interface RuntimeStageArgs {
   builderSources: McpSource[];
   registrySources: McpSource[];
   siblingSources: McpSource[];
+  localExtensions: LocalExtension[];
   stageNames: Map<string, string>;
   persistentDirs: string[];
   needsNode: boolean;
@@ -290,6 +299,7 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
     builderSources,
     registrySources,
     siblingSources,
+    localExtensions,
     stageNames,
     persistentDirs,
     needsNode,
@@ -387,6 +397,21 @@ function renderRuntimeStage(args: RuntimeStageArgs): string {
   lines.push('# Recipes — cook emitted these into <outDir>/recipes/.');
   lines.push('COPY recipes /app/recipes');
   lines.push('');
+
+  // Local extensions — cook bundled these from the operator's disk into
+  // <outDir>/extensions/<name>/. They live under /app so Bun's upward
+  // node_modules resolution reaches connectome-host's dependency tree.
+  if (localExtensions.length > 0) {
+    lines.push('# Recipe extensions bundled from the operator\'s disk.');
+    for (const ext of localExtensions) {
+      lines.push(`COPY extensions/${ext.name} ${ext.inContainerPath}`);
+    }
+    const withDeps = localExtensions.filter((e) => e.hasPackageJson);
+    for (const ext of withDeps) {
+      lines.push(`RUN cd ${ext.inContainerPath} && bun install`);
+    }
+    lines.push('');
+  }
 
   // mkdir -p for every persistent dir; chown -R bun:bun on /app + every
   // in-container source path.

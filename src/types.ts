@@ -36,10 +36,21 @@ export type InstallPattern =
    *  recipe's MCP server has no `source` block and we're not in `--strict`. */
   | { kind: 'sibling-copy'; siblingDir: string };
 
-/** Normalized metadata for one MCP server whose source we need to bake in.
- *  Deduplication key: `${url}@${ref}`. Multiple recipe refs may point at
- *  the same source (e.g. Zulip is used by miner, reviewer, and clerk). */
+/** Normalized metadata for one component whose source we need to bake in —
+ *  an MCP server (role 'mcp', the default) or a recipe extension (role
+ *  'extension', target `/app/extensions/<name>`). Deduplication key:
+ *  `${url}@${ref}` for MCP; `ext:${name}` for extensions. Multiple recipe
+ *  refs may point at the same source (e.g. Zulip is used by miner,
+ *  reviewer, and clerk). */
 export interface McpSource {
+  /** What this source provides. Absent means 'mcp' (pre-extension shape). */
+  role?: 'mcp' | 'extension';
+  /** For role 'extension': the recipe `extensions` key that declared it. */
+  extensionName?: string;
+  /** For role 'extension': entry module path relative to the source root,
+   *  normalized (no leading `./`). Overlay rewrites the shipped recipe's
+   *  extension path to `${inContainerPath}/${entry}`. */
+  entry?: string;
   /** Unique key used for deduplication across a walked recipe tree. */
   key: string;
   /** Source git URL (from `RecipeMcpServerSource.url`). */
@@ -63,12 +74,36 @@ export interface McpSource {
   refs: SourceRef[];
 }
 
-/** A reference to an McpSource from a specific recipe's MCP server entry. */
+/** A reference to an McpSource from a specific recipe's MCP server entry
+ *  (or, for role 'extension', the recipe's `extensions` key — reusing the
+ *  field keeps every existing error/README formatter working unchanged). */
 export interface SourceRef {
   /** Path of the recipe that references this source. */
   recipePath: string;
-  /** Name of the MCP server entry (`recipe.mcpServers[].name`). */
+  /** Name of the MCP server entry (`recipe.mcpServers[].name`) or the
+   *  extension name for role 'extension'. */
   mcpServerName: string;
+}
+
+/** A source-less extension with a recipe-relative path: cook bundles the
+ *  directory containing the entry file from the operator's disk into the
+ *  build context (`<outDir>/extensions/<name>/`) and the Dockerfile COPYs
+ *  it to `/app/extensions/<name>`. node_modules/.git are excluded from the
+ *  bundle; if the directory has a package.json, the runtime stage runs
+ *  `bun install` in it so the extension's own deps resolve. */
+export interface LocalExtension {
+  /** Recipe `extensions` key — also the bundle dir name. */
+  name: string;
+  /** Absolute host directory to bundle (dirname of the resolved entry). */
+  hostDir: string;
+  /** Entry file basename within hostDir (e.g. `index.ts`). */
+  entryBasename: string;
+  /** Absolute in-image path: `/app/extensions/<name>`. */
+  inContainerPath: string;
+  /** Whether hostDir contains a package.json (drives the bun install step). */
+  hasPackageJson: boolean;
+  /** Where this extension is referenced (for errors + README). */
+  refs: SourceRef[];
 }
 
 /** An environment variable discovered by scanning recipe JSON for `${VAR}`
@@ -114,8 +149,11 @@ export type SubcommandHandler = (argv: string[]) => Promise<number>;
 export interface GeneratorInput {
   /** Walker output: parent first, then descendants in declaration order. */
   walks: WalkResult[];
-  /** Deduplicated MCP sources discovered across the walked recipes. */
+  /** Deduplicated sources discovered across the walked recipes: MCP servers
+   *  plus git-sourced extensions (role 'extension'). */
   sources: McpSource[];
+  /** Source-less extensions bundled from the operator's disk. */
+  localExtensions?: LocalExtension[];
   /** Environment variables referenced anywhere in the walked recipes. */
   envVars: EnvVar[];
   /** Build-time options (output dir, image name, strict mode, etc.). */

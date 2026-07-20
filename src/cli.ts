@@ -1,6 +1,6 @@
 import mri from 'mri';
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { log } from './log.js';
@@ -11,9 +11,10 @@ import type {
   SubcommandHandler,
   WalkResult,
 } from './types.js';
-import type { Recipe, RecipeMcpServer } from './vendor/recipe.js';
+import type { Recipe, RecipeExtension, RecipeMcpServer } from './vendor/recipe.js';
 import { walkRecipe } from './walker.js';
 import { detectSources } from './source-detector.js';
+import { detectExtensions } from './extension-detector.js';
 import { collectEnvVars } from './env-collector.js';
 import { generateDockerfile } from './generators/dockerfile.js';
 import { generateCompose } from './generators/compose.js';
@@ -125,6 +126,15 @@ function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Rec
         : (overlayServer as RecipeMcpServer);
     }
   }
+  if (overlay.extensions) {
+    merged.extensions = { ...(recipe.extensions ?? {}) };
+    for (const [name, overlayExt] of Object.entries(overlay.extensions)) {
+      const original = recipe.extensions?.[name];
+      merged.extensions[name] = original
+        ? { ...original, ...(overlayExt as Partial<RecipeExtension>) }
+        : (overlayExt as RecipeExtension);
+    }
+  }
   return merged;
 }
 
@@ -138,13 +148,27 @@ function applyOverlay(recipe: Recipe, overlay: Partial<Recipe> | undefined): Rec
  *  the block to `sourceMeta` sidesteps validation entirely while keeping the
  *  provenance visible to anyone reading the shipped recipe. */
 function demoteMcpSource(recipe: Recipe): Recipe {
-  if (!recipe.mcpServers) return recipe;
-  const mcpServers: Record<string, RecipeMcpServer> = {};
-  for (const [name, server] of Object.entries(recipe.mcpServers)) {
-    const { source, ...rest } = server;
-    mcpServers[name] = source === undefined ? rest : { ...rest, sourceMeta: source };
+  let result = recipe;
+  if (recipe.mcpServers) {
+    const mcpServers: Record<string, RecipeMcpServer> = {};
+    for (const [name, server] of Object.entries(recipe.mcpServers)) {
+      const { source, ...rest } = server;
+      mcpServers[name] = source === undefined ? rest : { ...rest, sourceMeta: source };
+    }
+    result = { ...result, mcpServers };
   }
-  return { ...recipe, mcpServers };
+  // Same demotion for extension sources — the runtime loader only knows the
+  // extension entry's runtime fields; `source` is cook's acquisition input,
+  // preserved as provenance under `sourceMeta`.
+  if (recipe.extensions) {
+    const extensions: Record<string, RecipeExtension> = {};
+    for (const [name, ext] of Object.entries(recipe.extensions)) {
+      const { source, ...rest } = ext;
+      extensions[name] = source === undefined ? rest : { ...rest, sourceMeta: source };
+    }
+    result = { ...result, extensions };
+  }
+  return result;
 }
 
 /** Quote a value for safe inclusion in a `.env` file consumed by
@@ -277,13 +301,23 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   const outDir = resolve(flags.out ?? defaultOutDir(parentWalk.recipe));
 
   let sources;
+  let localExtensions;
   let envVars;
   try {
     log.step(`detecting MCP sources (${flags.strict ? 'strict' : 'non-strict'})`);
     sources = detectSources(walks, { strict: !!flags.strict });
+    // Extensions: git-sourced ones join the sources list (builder stages,
+    // secrets, systemPackages all reuse the MCP machinery); local bundles
+    // are copied from the operator's disk into the build context below.
+    const detectedExts = detectExtensions(walks, { strict: !!flags.strict });
+    sources = [...sources, ...detectedExts.gitExtensions];
+    localExtensions = detectedExts.localExtensions;
     envVars = collectEnvVars(walks);
     log.success(
-      `detected ${sources.length} MCP source${sources.length === 1 ? '' : 's'}, ` +
+      `detected ${sources.length} source${sources.length === 1 ? '' : 's'}` +
+      `${detectedExts.gitExtensions.length + localExtensions.length > 0
+        ? ` (incl. ${detectedExts.gitExtensions.length + localExtensions.length} extension${detectedExts.gitExtensions.length + localExtensions.length === 1 ? '' : 's'})`
+        : ''}, ` +
       `${envVars.length} env var${envVars.length === 1 ? '' : 's'}`,
     );
   } catch (err) {
@@ -384,7 +418,7 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     imageName: flags['image-name'],
     pinRefs: !!flags['pin-refs'],
   };
-  const input: GeneratorInput = { walks, sources, envVars, options: buildOptions };
+  const input: GeneratorInput = { walks, sources, localExtensions, envVars, options: buildOptions };
 
   log.step(`generating artifacts → ${log.dim(outDir)}`);
   let dockerfile: string;
@@ -629,7 +663,8 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     + credFilesToWrite.length
     + authSecretFiles.length
     + sidecarSecretFiles.length
-    + renderedTemplates.length;
+    + renderedTemplates.length
+    + localExtensions.length;
 
   // Confirm-before-write gate.  Skipped in --no-prompts mode (the operator
   // told us to be non-interactive; bombing into a confirm prompt would
@@ -686,6 +721,21 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     }
     for (const { filename, content } of recipesOut) {
       writeFileSync(join(outDir, 'recipes', filename), content);
+    }
+    // Local extension bundles: copy the entry file's directory from the
+    // operator's disk into the build context. node_modules and .git are
+    // excluded — the image resolves deps against /app/node_modules (plus a
+    // fresh `bun install` when the bundle carries a package.json).
+    for (const ext of localExtensions) {
+      const target = join(outDir, 'extensions', ext.name);
+      rmSync(target, { recursive: true, force: true });
+      cpSync(ext.hostDir, target, {
+        recursive: true,
+        filter: (src) => {
+          const base = basename(src);
+          return base !== 'node_modules' && base !== '.git';
+        },
+      });
     }
   } catch (err) {
     log.error(`write failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -810,6 +860,28 @@ async function handleCheck(argv: string[]): Promise<number> {
       const refLabel = src.ref ? `@${src.ref}` : '';
       process.stdout.write(`    ${log.bold(src.url + refLabel)}  ${log.dim(`(${src.install.kind} → ${src.inContainerPath})`)}  used by: ${refList}\n`);
     }
+  }
+
+  let detectedExts;
+  try {
+    log.step('detecting extensions');
+    detectedExts = detectExtensions(walks, { strict: !!flags.strict });
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+  const extCount = detectedExts.gitExtensions.length + detectedExts.localExtensions.length;
+  log.success(`detected ${extCount} extension${extCount === 1 ? '' : 's'}`);
+  for (const ext of detectedExts.gitExtensions) {
+    const refLabel = ext.ref && ext.ref !== 'main' ? `@${ext.ref}` : '';
+    process.stdout.write(
+      `    ${log.bold(ext.extensionName!)}  ${log.dim(`(git: ${ext.url}${refLabel} → ${ext.inContainerPath}/${ext.entry})`)}\n`,
+    );
+  }
+  for (const ext of detectedExts.localExtensions) {
+    process.stdout.write(
+      `    ${log.bold(ext.name)}  ${log.dim(`(local bundle: ${ext.hostDir} → ${ext.inContainerPath}/${ext.entryBasename})`)}\n`,
+    );
   }
 
   log.step('collecting environment variables');

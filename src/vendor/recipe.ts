@@ -1,7 +1,10 @@
 /**
  * Vendored from connectome-host: forking-knowledge-miner/src/recipe.ts
  * Sync source: github.com/anima-research/connectome-host
- * Last synced: feat/sidecar-services branch (sidecar `services` + `templateFiles`).
+ * Last synced: feat/recipe-extensions branch (recipe `extensions` block —
+ *              custom strategies/modules via local imports; strategy.type
+ *              widened to admit extension-registered names).
+ *              Earlier: feat/sidecar-services branch (sidecar `services` + `templateFiles`).
  *              Earlier: commit f4b6588 (feat(recipe): \${VAR:-default} substitution
  *              syntax — adds optional-with-fallback form to substituteEnvVars).
  *              Earlier syncs: bb40b64 (credentialFiles), a111e79 (parent-dir
@@ -47,11 +50,38 @@ import { isAbsolute, resolve } from 'node:path';
 // ---------------------------------------------------------------------------
 
 export interface RecipeStrategy {
-  type: 'autobiographical' | 'passthrough' | 'frontdesk';
+  /** Built-in strategy name, or a custom type registered by a
+   *  `kind: "strategy"` extension (see `Recipe.extensions`). */
+  type: 'autobiographical' | 'passthrough' | 'frontdesk' | (string & {});
   headWindowTokens?: number;
   recentWindowTokens?: number;
   compressionModel?: string;
   maxMessageTokens?: number;
+}
+
+/**
+ * A deployment-specific code extension: a local TS/JS module the host
+ * imports at boot to register custom context strategies and/or framework
+ * modules. Cook's job is making `path` true inside the image: git-sourced
+ * extensions are cloned/built into `/app/extensions/<name>` and the shipped
+ * recipe's `path` is overlay-rewritten; source-less relative paths are
+ * bundled from the operator's disk into the build context.
+ */
+export interface RecipeExtension {
+  /** Primary purpose — gates upstream validation (custom `strategy.type`
+   *  needs at least one `kind: "strategy"` extension) and informs cook. */
+  kind: 'strategy' | 'module';
+  /** Entry module path. With `source`: relative to the cloned repo root.
+   *  Without: recipe-relative (cook bundles the containing directory) or
+   *  absolute (cook can't bake it — operator must bind-mount). */
+  path: string;
+  /** Opaque blob passed to the extension's register() at runtime. */
+  config?: Record<string, unknown>;
+  /** Acquisition metadata — same git shape as mcpServers[].source. */
+  source?: RecipeMcpServerGitSource;
+  /** Build-only provenance: `source` demoted by cook into the shipped
+   *  recipe (mirrors mcpServers[].sourceMeta). */
+  sourceMeta?: RecipeMcpServerGitSource;
 }
 
 export interface RecipeAgent {
@@ -205,6 +235,8 @@ export interface Recipe {
   agent: RecipeAgent;
   mcpServers?: Record<string, RecipeMcpServer>;
   modules?: RecipeModules;
+  /** Deployment-specific code extensions, keyed by a human-readable name. */
+  extensions?: Record<string, RecipeExtension>;
   sessionNaming?: { examples?: string[] };
   /** Sidecar services that build/deploy tooling includes alongside the agent
    *  process (databases, viewers, search engines, reverse proxies).  Loader
@@ -440,16 +472,84 @@ export function validateRecipe(raw: unknown): Recipe {
     throw new Error('Recipe agent must have a "systemPrompt" string');
   }
 
+  // Extensions block — validated before the strategy check, which consults
+  // it to admit custom strategy types. Kept in sync with upstream's
+  // validateRecipe (feat/recipe-extensions).
+  let hasStrategyExtension = false;
+  if (obj.extensions !== undefined) {
+    if (!obj.extensions || typeof obj.extensions !== 'object' || Array.isArray(obj.extensions)) {
+      throw new Error('Recipe "extensions" must be an object mapping names to extension entries.');
+    }
+    for (const [name, entry] of Object.entries(obj.extensions as Record<string, unknown>)) {
+      if (!name) throw new Error('Recipe extensions keys must be non-empty names.');
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`extensions.${name} must be an object`);
+      }
+      const ext = entry as Record<string, unknown>;
+      if (ext.kind !== 'strategy' && ext.kind !== 'module') {
+        throw new Error(`extensions.${name}.kind must be "strategy" or "module", got ${JSON.stringify(ext.kind)}`);
+      }
+      if (typeof ext.path !== 'string' || !ext.path) {
+        throw new Error(`extensions.${name}.path must be a non-empty string`);
+      }
+      if (ext.config !== undefined && (!ext.config || typeof ext.config !== 'object' || Array.isArray(ext.config))) {
+        throw new Error(`extensions.${name}.config must be an object`);
+      }
+      if (ext.source !== undefined) {
+        if (!ext.source || typeof ext.source !== 'object' || Array.isArray(ext.source)) {
+          throw new Error(`extensions.${name}.source must be an object`);
+        }
+        const src = ext.source as Record<string, unknown>;
+        // Extensions only support the git source shape — an npm-registry
+        // package can't carry the local entry file the host imports.
+        if (typeof src.url !== 'string' || !src.url) {
+          throw new Error(`extensions.${name}.source.url must be a non-empty string (git source shape)`);
+        }
+        if (src.ref !== undefined && typeof src.ref !== 'string') {
+          throw new Error(`extensions.${name}.source.ref must be a string`);
+        }
+        if (src.install !== undefined) {
+          const install = src.install;
+          const isShorthand = install === 'npm' || install === 'pip-editable';
+          const isCustom =
+            typeof install === 'object' && install !== null
+            && typeof (install as Record<string, unknown>).run === 'string'
+            && ['node', 'python3', 'custom', 'bun'].includes(
+              (install as Record<string, unknown>).runtime as string,
+            );
+          if (!isShorthand && !isCustom) {
+            throw new Error(
+              `extensions.${name}.source.install must be 'npm', 'pip-editable', ` +
+              `or { run: string, runtime: 'node' | 'python3' | 'custom' | 'bun' }`,
+            );
+          }
+        }
+        if (src.systemPackages !== undefined) {
+          if (!Array.isArray(src.systemPackages)
+            || !(src.systemPackages as unknown[]).every(
+              (p) => typeof p === 'string' && /^[a-z0-9][a-z0-9+.\-]+$/.test(p),
+            )) {
+            throw new Error(`extensions.${name}.source.systemPackages must be an array of Debian package names`);
+          }
+        }
+      }
+      if (ext.kind === 'strategy') hasStrategyExtension = true;
+    }
+  }
+
   if (agent.strategy) {
     const strategy = agent.strategy as Record<string, unknown>;
     if (
       strategy.type &&
       strategy.type !== 'autobiographical' &&
       strategy.type !== 'passthrough' &&
-      strategy.type !== 'frontdesk'
+      strategy.type !== 'frontdesk' &&
+      !hasStrategyExtension
     ) {
       throw new Error(
-        `Invalid strategy type "${strategy.type}". Must be "autobiographical", "passthrough", or "frontdesk".`,
+        `Invalid strategy type "${strategy.type}". Must be "autobiographical", "passthrough", ` +
+        `or "frontdesk" — or a custom type registered by a "kind": "strategy" entry in the ` +
+        `recipe's "extensions" block (none is declared).`,
       );
     }
   }
