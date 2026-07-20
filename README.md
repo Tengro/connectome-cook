@@ -1,8 +1,10 @@
 # connectome-cook
 
-Recipes in, Docker images out. A CLI that takes a [connectome-host](https://github.com/anima-research/connectome-host) recipe (single agent or multi-agent fleet) and cooks it into a runnable Docker artifact bundle with all required MCP servers baked in.
+Recipes in, deployments out. A CLI that takes a [connectome-host](https://github.com/anima-research/connectome-host) recipe (single agent or multi-agent fleet) and materializes it — either as a runnable Docker artifact bundle (`cook build`) or as a direct install onto your machine (`cook install`), with all required MCP servers **and code extensions** baked in.
 
-> **Status:** alpha. The core pipeline works — `cook init`, `cook check`, `cook build`, and `cook run` all do something useful, end-to-end against the in-repo Triumvirate example. Expect rough edges around `--pin-refs`, `--json` reports, and pip-editable arg overlays. Not yet on npm.
+The pipeline is split in two: a backend-agnostic *resolution* step (walk the recipe tree, detect components, probe host requirements, collect env/credential values) produces an install plan; a backend materializes it. Every materialization writes a `connectome.lock` recording what was resolved, and `cook run` launches from the lock without re-resolving.
+
+> **Status:** alpha. The core pipeline works — `cook init`, `cook check`, `cook build`, `cook install`, and `cook run` all do something useful, end-to-end against the in-repo Triumvirate example. Expect rough edges around `--pin-refs`, `--json` reports, and pip-editable arg overlays. Not yet on npm.
 
 ## Install
 
@@ -30,10 +32,68 @@ cook check my-agent.json
 # README, recipes/).  Prompts for any required env vars unless --no-prompts.
 cook build my-agent.json --out ./my-agent-cook
 
-# Build + docker compose up in one step.
-cook run my-agent.json -- -d            # detached
-cook run my-agent.json                   # attached (default; --build implied)
+# Install directly onto this machine — no docker. Clones + builds every
+# component under ~/.connectome/installs/<name>/, resolves host requirements
+# (probe + confirm), writes run.sh + connectome.lock. The full action plan
+# is printed and confirmed before anything executes on your machine.
+cook install my-agent.json
+
+# Launch. Finds an existing materialization (lock in the named dir, then
+# ./<name>-cook, then ~/.connectome/installs/<name>) and launches it without
+# re-resolving; falls back to build-then-compose-up. --rebuild forces a re-cook.
+cook run my-agent.json -- -d            # detached (docker) / launcher args (host)
+cook run ~/.connectome/installs/my-agent # launch a materialized dir directly
 ```
+
+The bin is also installed as **`connectome`** — `connectome cook <recipe>`,
+`connectome install <recipe>`, `connectome run <recipe>` are the same commands.
+
+### Extensions
+
+Recipes can carry deployment-specific code — custom context-manager
+strategies and agent-framework modules — via the `extensions` block
+(connectome-host ≥ the `feat/recipe-extensions` seam):
+
+```jsonc
+{
+  "agent": { "strategy": { "type": "zk", "floodWindowMs": 250 } },
+  "extensions": {
+    "zk-strategy": {
+      "kind": "strategy",                      // or "module"
+      "path": "./extensions/zk/index.ts",      // entry module
+      "source": { "url": "https://github.com/you/zk-ext.git", "ref": "main" }
+    }
+  }
+}
+```
+
+- **With `source`**: cook clones/builds it into `/app/extensions/<name>`
+  (docker) or `<install>/app/extensions/<name>` (host); `path` is relative
+  to the repo root. Same install patterns as MCP sources (`npm`,
+  `pip-editable`, custom run commands, authSecret, systemPackages).
+- **Without `source`, relative path**: cook bundles the entry file's
+  directory from your disk (docker) or uses it in place (host).
+- Extensions live under the connectome-host tree so they share its
+  `node_modules` — `extends AutobiographicalStrategy` resolves against the
+  exact versions the host ships.
+
+### Host requirements (discovery)
+
+For code that must link against things already on the machine:
+
+```jsonc
+"requirements": {
+  "spring-engine": {
+    "probe": ["/opt/spring", "~/spring", "$SPRING_HOME"],
+    "prompt": "Path to your Spring engine install",
+    "exposeAs": "SPRING_HOME"
+  }
+}
+```
+
+Cook probes the candidates, suggests the first hit, lets you confirm or
+override, and exposes the answer as `$SPRING_HOME` — usable in recipe
+`${VAR}` references and install steps, and recorded in the lock.
 
 ### Templates
 
@@ -55,14 +115,24 @@ cook run my-agent.json                   # attached (default; --build implied)
 ## What gets generated
 
 ```
-<outDir>/
-├── Dockerfile               # multi-stage; one builder per MCP source + ch-deps + runtime
+<outDir>/                    # cook build (docker backend)
+├── Dockerfile               # multi-stage; one builder per source (MCP + extensions) + ch-deps + runtime
 ├── docker-compose.yml       # single service; bind mounts from workspace mounts
 ├── .env.example             # template for ANTHROPIC_API_KEY + recipe ${VAR}s
 ├── .env                     # only when prompts/env-file/process.env supplied values
 ├── README.md                # operator instructions, data-driven from the recipe
+├── connectome.lock          # record of the materialization (components, requirements, launch)
+├── extensions/              # local extension bundles (when declared)
 └── recipes/
-    └── <each-walked-recipe>.json    # originals + overlays (when needed)
+    └── <each-walked-recipe>.json    # lowered configurations (overlays applied, source → sourceMeta)
+
+<installDir>/                # cook install (host backend)
+├── app/                     # connectome-host checkout (bun install'd; extensions under app/extensions/)
+├── <repo-basename>/         # MCP source checkouts (mirrors the container layout)
+├── recipes/                 # lowered configurations with host-absolute paths
+├── .env                     # shell-sourceable operator values (mode 0600)
+├── run.sh                   # launcher: source .env, cd app, exec bun
+└── connectome.lock
 ```
 
 The build context for `docker build` is `<outDir>` itself — operators don't need to clone connectome-cook to build the resulting image.

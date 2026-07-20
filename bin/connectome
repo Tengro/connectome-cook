@@ -1,0 +1,8 @@
+#!/usr/bin/env bun
+import { main } from '../src/cli.js';
+
+main(process.argv.slice(2)).catch((err) => {
+  const message = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`cook: ${message}\n`);
+  process.exit(1);
+});

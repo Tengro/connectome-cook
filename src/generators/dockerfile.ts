@@ -70,9 +70,10 @@ import { getRuntime, repoBasename } from '../runtimes/index.js';
 import * as customRuntime from '../runtimes/custom.js';
 import * as npmRuntime from '../runtimes/npm.js';
 
-/** Default URL of the connectome-host repo to clone into the `ch-deps` stage. */
-const DEFAULT_CH_REPO_URL = 'https://github.com/anima-research/connectome-host.git';
-const DEFAULT_CH_REF = 'main';
+/** Default URL of the connectome-host repo to clone into the `ch-deps` stage.
+ *  Exported: the host backend and lockfile writers share these defaults. */
+export const DEFAULT_CH_REPO_URL = 'https://github.com/anima-research/connectome-host.git';
+export const DEFAULT_CH_REF = 'main';
 
 /** Base image for the connectome-host bun-deps + runtime stages. */
 const BUN_BASE_IMAGE = 'oven/bun:1-debian';

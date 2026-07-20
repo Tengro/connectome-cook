@@ -25,6 +25,8 @@ import { confirmWrite, resolveValue } from '../prompts.js';
 import { hostFilename, serializeCredentialFile } from '../credentials.js';
 import { lowerToConfiguration, recipeFilename } from '../configuration.js';
 import { renderTemplate } from '../template.js';
+import { DEFAULT_CH_REF, DEFAULT_CH_REPO_URL } from '../generators/dockerfile.js';
+import { writeLockfile, type Lockfile } from '../lockfile.js';
 
 export interface DockerBackendOptions extends BuildOptions {
   /** Write templated config files even when `${VAR}` references render
@@ -351,7 +353,8 @@ export async function runDockerBackend(
     );
   }
 
-  const fileCount = 5
+  // +1 for connectome.lock.
+  const fileCount = 6
     + recipesOut.length
     + (writeEnvFile ? 1 : 0)
     + credFilesToWrite.length
@@ -431,6 +434,40 @@ export async function runDockerBackend(
         },
       });
     }
+
+    // connectome.lock — record of the materialization; `cook run` launches
+    // from it without re-resolving. Commits stay undefined until --pin-refs
+    // lands (the image clones at build time, not cook time).
+    const lock: Lockfile = {
+      version: 1,
+      backend: 'docker',
+      recipePath: plan.recipePath,
+      createdAt: new Date().toISOString(),
+      connectomeHost: { url: DEFAULT_CH_REPO_URL, ref: DEFAULT_CH_REF },
+      components: sources
+        .filter((s) => s.install.kind !== 'sibling-copy')
+        .map((s) => ({
+          key: s.key,
+          role: s.role === 'extension' ? 'extension' as const : 'mcp' as const,
+          url: s.url,
+          ref: s.ref,
+          path: s.inContainerPath,
+          install: s.install.kind,
+        })),
+      localExtensions: localExtensions.map((ext) => ({
+        name: ext.name,
+        hostDir: ext.hostDir,
+        path: `${ext.inContainerPath}/${ext.entryBasename}`,
+      })),
+      requirements: plan.requirements.map((r) => ({
+        name: r.name,
+        envName: r.envName,
+        origin: r.origin,
+        ...(r.value !== undefined ? { value: r.value } : {}),
+      })),
+      launch: { kind: 'compose', dir: outDir },
+    };
+    writeLockfile(outDir, lock);
   } catch (err) {
     log.error(`write failed: ${err instanceof Error ? err.message : String(err)}`);
     return { exitCode: 3, outDir };

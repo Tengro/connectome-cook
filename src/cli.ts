@@ -2,12 +2,14 @@ import mri from 'mri';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { log } from './log.js';
 import { slugify } from './slug.js';
 import type { SubcommandHandler } from './types.js';
-import type { Recipe } from './vendor/recipe.js';
+import { loadRecipeRaw, type Recipe } from './vendor/recipe.js';
+import { LOCKFILE_NAME, readLockfile } from './lockfile.js';
 import { walkRecipe } from './walker.js';
 import { detectSources } from './source-detector.js';
 import { detectExtensions } from './extension-detector.js';
@@ -28,15 +30,15 @@ const pkg = JSON.parse(
   ),
 ) as { name: string; version: string };
 
-const USAGE = `${log.bold('connectome-cook')} — recipes in, Docker images out.
+const USAGE = `${log.bold('connectome-cook')} — recipes in, deployments out (docker images or host installs).
 
 ${log.bold('Usage:')}
-  cook <command> [args] [flags]
+  cook <command> [args] [flags]        (also installed as \`connectome\`)
 
 ${log.bold('Commands:')}
-  build <recipe>         Generate Docker artifacts for a recipe
+  build <recipe>         Generate Docker artifacts for a recipe (aka \`cook\`)
   install <recipe>       Install directly onto this machine (no docker)
-  run <recipe>           Build, then \`docker compose up\`
+  run <recipe|dir>       Launch a materialized deployment (build first if none)
   check <recipe>         Validate a recipe without writing files
   init <name>            Scaffold a starter recipe
 
@@ -209,37 +211,121 @@ async function handleBuild(argv: string[]): Promise<number> {
   return result.exitCode;
 }
 
-const RUN_USAGE = `${log.bold('cook run')} — build then \`docker compose up\` from the cook output dir.
+const RUN_USAGE = `${log.bold('cook run')} — launch a materialized deployment (or build, then launch).
 
 ${log.bold('Usage:')}
-  cook run <recipe-path-or-url> [build-flags] [-- compose-args]
+  cook run <recipe-or-materialized-dir> [build-flags] [-- passthrough-args]
 
-Build flags are the same as ${log.bold('cook build')}.  Anything after \`--\` is
-passed through to \`docker compose up\` (e.g. \`-- -d\` for detached).
+Resolution order:
+  1. If the argument is a directory with a ${log.dim('connectome.lock')}, launch it
+     directly (docker compose up for docker installs, run.sh for host installs).
+  2. If the argument is a recipe, look for an existing materialization
+     (--out dir, ./<name>-cook, then ~/.connectome/installs/<name>) and
+     launch the first one found — no re-resolution, no prompts.
+  3. Otherwise fall through to the classic build-then-\`docker compose up\`.
+     Pass ${log.bold('--rebuild')} to force this path even when a lock exists.
 
-By default cook runs ${log.dim('docker compose up --build')} attached so you can
-see the TUI directly.  Use ${log.dim('-- -d')} for detached.
+Build flags are the same as ${log.bold('cook build')}.  Anything after \`--\` goes to
+\`docker compose up\` (docker) or the launcher script (host) — e.g. \`-- -d\`.
 `;
+
+/** Launch a materialized dir per its lockfile: compose or launcher script. */
+function launchFromLock(dir: string, passthroughArgs: string[]): Promise<number> {
+  const lock = readLockfile(dir);
+  if (!lock) {
+    log.error(`${dir}: no ${LOCKFILE_NAME} — nothing to launch`);
+    return Promise.resolve(1);
+  }
+  let command: string;
+  let args: string[];
+  let cwd: string;
+  if (lock.launch.kind === 'compose') {
+    command = 'docker';
+    args = passthroughArgs.length > 0
+      ? ['compose', 'up', ...passthroughArgs]
+      : ['compose', 'up', '--build'];
+    cwd = lock.launch.dir;
+    // The lock may have been produced on another checkout of the same
+    // artifacts — prefer the directory we actually found the lock in.
+    if (!existsSync(join(cwd, 'docker-compose.yml'))) cwd = dir;
+    log.step(`docker compose up in ${log.dim(cwd)}`);
+  } else {
+    command = existsSync(lock.launch.script) ? lock.launch.script : join(dir, 'run.sh');
+    args = passthroughArgs;
+    cwd = dir;
+    log.step(`launching ${log.dim(command)}`);
+  }
+  return new Promise<number>((resolveExit) => {
+    const child = spawn(command, args, { cwd, stdio: 'inherit' });
+    child.on('close', (code) => resolveExit(code ?? 3));
+    child.on('error', (err) => {
+      log.error(`failed to launch: ${err.message}`);
+      resolveExit(3);
+    });
+  });
+}
+
+/** Candidate materialization dirs for a recipe, in preference order. */
+async function findMaterialization(
+  target: string,
+  outFlag: string | undefined,
+): Promise<string | null> {
+  const candidates: string[] = [];
+  if (outFlag) candidates.push(resolve(outFlag));
+  try {
+    const recipe = await loadRecipeRaw(target);
+    const slug = slugify(recipe.name);
+    candidates.push(resolve(`./${slug}-cook`));
+    candidates.push(join(homedir(), '.connectome', 'installs', slug));
+  } catch {
+    // Unloadable recipe — the build path will surface the real error.
+  }
+  for (const dir of candidates) {
+    if (existsSync(join(dir, LOCKFILE_NAME))) return dir;
+  }
+  return null;
+}
 
 async function handleRun(argv: string[]): Promise<number> {
   // Split argv at the `--` separator: anything before goes to build,
-  // anything after goes to docker compose.
+  // anything after goes to the launch target (compose / launcher script).
   const sep = argv.indexOf('--');
   const buildArgs = sep === -1 ? argv : argv.slice(0, sep);
-  const composeArgs = sep === -1 ? [] : argv.slice(sep + 1);
+  const passthroughArgs = sep === -1 ? [] : argv.slice(sep + 1);
 
   if (buildArgs.includes('--help') || buildArgs.includes('-h')) {
     process.stdout.write(RUN_USAGE);
     return 0;
   }
 
-  const buildResult = await runBuildPipeline(buildArgs);
+  const runFlags = mri(buildArgs, {
+    boolean: ['rebuild'],
+    string: ['out'],
+  });
+  const [target] = runFlags._ as string[];
+
+  // 1. Materialized dir named directly.
+  if (target && existsSync(join(target, LOCKFILE_NAME))) {
+    return launchFromLock(resolve(target), passthroughArgs);
+  }
+
+  // 2. Recipe with an existing materialization — launch without re-resolving.
+  if (target && !runFlags.rebuild) {
+    const found = await findMaterialization(target, runFlags.out);
+    if (found) {
+      log.info(`found existing materialization ${log.dim(found)} (use --rebuild to re-cook)`);
+      return launchFromLock(found, passthroughArgs);
+    }
+  }
+
+  // 3. Classic path: build the docker bundle, then compose up.
+  const buildResult = await runBuildPipeline(buildArgs.filter((a) => a !== '--rebuild'));
   if (buildResult.exitCode !== 0) {
     return buildResult.exitCode;
   }
 
   log.step(`docker compose up in ${log.dim(buildResult.outDir)}`);
-  const composeFinalArgs = composeArgs.length > 0 ? ['up', ...composeArgs] : ['up', '--build'];
+  const composeFinalArgs = passthroughArgs.length > 0 ? ['up', ...passthroughArgs] : ['up', '--build'];
   return new Promise<number>((resolveExit) => {
     const child = spawn('docker', ['compose', ...composeFinalArgs], {
       cwd: buildResult.outDir,
@@ -404,6 +490,9 @@ async function handleInit(argv: string[]): Promise<number> {
 
 const SUBCOMMANDS: Record<string, SubcommandHandler> = {
   build: handleBuild,
+  // `connectome cook <recipe>` — the image-baking case, named after the tool
+  // that grew into this installer.
+  cook: handleBuild,
   install: handleInstall,
   run: handleRun,
   check: handleCheck,

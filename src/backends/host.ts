@@ -61,8 +61,7 @@ export interface HostBackendOptions {
   chRef: string;
 }
 
-export const DEFAULT_CH_REPO_URL = 'https://github.com/anima-research/connectome-host.git';
-export const DEFAULT_CH_REF = 'main';
+export { DEFAULT_CH_REF, DEFAULT_CH_REPO_URL } from '../generators/dockerfile.js';
 
 // ---------------------------------------------------------------------------
 // Action planning (pure — unit-testable)
