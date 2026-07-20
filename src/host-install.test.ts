@@ -41,6 +41,7 @@ const OPTIONS: HostBackendOptions = {
   yes: true,
   chRepoUrl: 'https://github.com/anima-research/connectome-host.git',
   chRef: 'main',
+  allowIncompleteTemplates: false,
 };
 
 function mcpSource(overrides: Partial<McpSource>): McpSource {

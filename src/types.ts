@@ -57,6 +57,10 @@ export interface McpSource {
   url: string;
   /** Git ref: branch name, tag, or refspec. Empty when sibling-copy. */
   ref: string;
+  /** Commit SHA the ref resolved to at cook time (set by --pin-refs).
+   *  When present, builds check out this exact commit instead of the
+   *  branch tip, and it's recorded in connectome.lock. */
+  commit?: string;
   /** Install pattern — see `InstallPattern`. */
   install: InstallPattern;
   /** Name of the env var holding a secret consumed by the install step
@@ -138,6 +142,9 @@ export interface BuildOptions {
   imageName?: string;
   /** If true, resolve each branch ref to its current commit SHA before baking. */
   pinRefs: boolean;
+  /** Pinned connectome-host SHA (set by --pin-refs): baked as the CH_REF
+   *  build-arg default so the image clones the exact commit. */
+  pinnedChRef?: string;
 }
 
 /** Subcommand handler signature — all subcommands conform to this. */

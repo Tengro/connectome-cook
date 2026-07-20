@@ -21,12 +21,17 @@ import { generateOverlays } from '../generators/overlay.js';
 import { generateEnv } from '../generators/env.js';
 import { generateReadme } from '../generators/readme.js';
 import { generateEntrypoint } from '../generators/entrypoint.js';
-import { confirmWrite, resolveValue } from '../prompts.js';
+import { confirmWrite } from '../prompts.js';
 import { hostFilename, serializeCredentialFile } from '../credentials.js';
 import { lowerToConfiguration, recipeFilename } from '../configuration.js';
-import { renderTemplate } from '../template.js';
 import { DEFAULT_CH_REF, DEFAULT_CH_REPO_URL } from '../generators/dockerfile.js';
 import { writeLockfile, type Lockfile } from '../lockfile.js';
+import {
+  buildValueBag,
+  collectSidecarSecretFiles,
+  enforceCompleteTemplates,
+  renderRuntimeFiles,
+} from './runtime-files.js';
 
 export interface DockerBackendOptions extends BuildOptions {
   /** Write templated config files even when `${VAR}` references render
@@ -65,28 +70,6 @@ function escapeForEnvFile(value: string): string {
   return `"${escaped}"`;
 }
 
-/** Warn when a templated config file's host mode is more restrictive than
- *  group/other-readable.  Cook can't help past this point — once docker
- *  bind-mounts the file (especially as `:ro`), the container can't chown
- *  it, so the runtime UID inside the container must already match the host
- *  UID that wrote the file.  Mode 0644 sidesteps the issue.
- *
- *  This is a soft warning, not a refusal: operators on Linux/WSL2 with the
- *  default UID 1000 happen to match `bun`'s UID 1000 in the oven/bun
- *  image, so 0600 works for them.  CI runners + macOS Docker Desktop +
- *  rootless docker hit the breakage. */
-function warnIfRestrictiveTemplateMode(mode: number, origin: string): void {
-  // Mode bits 0o044 = group-read + other-read.  If neither is set, only the
-  // owner can read — which inside a container means only the matching UID.
-  if ((mode & 0o044) === 0) {
-    log.warn(
-      `${origin}: mode 0${mode.toString(8)} is owner-only — the container's runtime UID must ` +
-      `match the host UID that wrote this file, or the bind mount will be unreadable. ` +
-      `Mode 0644 avoids the issue (the file lives in your build dir, which is already permission-protected).`,
-    );
-  }
-}
-
 /** Render a `.env` file body from collected key/value pairs.  Sorted by
  *  key for determinism; each line `KEY=value` with a trailing newline.
  *  Values are quoted/escaped per `escapeForEnvFile` so compose's
@@ -104,13 +87,11 @@ export async function runDockerBackend(
 ): Promise<BuildResult> {
   const {
     walks,
-    parentWalk,
     sources,
     localExtensions,
     envVars,
     credentialFiles,
     values: collectedValues,
-    envFileValues,
     credentialValues,
   } = plan;
   const outDir = options.outDir;
@@ -191,166 +172,30 @@ export async function runDockerBackend(
 
   // Sidecar runtime secrets.  Sidecars are folded into the plan's prompt
   // pipeline (see resolvePlan), so by this point any value the operator was
-  // going to supply is already in collectedValues.  Just enumerate, resolve
-  // via the shared helper, and collect file-write entries.
-  const sidecars = parentWalk.recipe.services ?? [];
-  const sidecarSecretFiles: Array<{ name: string; value: string }> = [];
-  const seenSidecarSecretNames = new Set<string>(seenAuthSecrets);
-  const missingSidecarSecrets: string[] = [];
-  for (const svc of sidecars) {
-    for (const secName of svc.secrets ?? []) {
-      if (seenSidecarSecretNames.has(secName)) continue;
-      seenSidecarSecretNames.add(secName);
-      const value = resolveValue(secName, {
-        envFileValues,
-        promptedValues: collectedValues,
-      });
-      if (value !== undefined) {
-        sidecarSecretFiles.push({ name: secName, value });
-      } else {
-        missingSidecarSecrets.push(secName);
-      }
-    }
-  }
-  for (const name of missingSidecarSecrets) {
-    log.warn(
-      `sidecar secret ${name}: no value supplied — file skipped (operator must hand-place \`${outDir}/${name}\` mode 0600 before \`docker compose up\`)`,
-    );
-  }
+  // going to supply is already in collectedValues.  Deduped against
+  // build-time authSecrets — same name, same file.
+  const sidecarSecretFiles = collectSidecarSecretFiles(
+    plan,
+    seenAuthSecrets,
+    `operator must hand-place the file (mode 0600) in ${outDir} before \`docker compose up\``,
+  );
 
   // Templated config files (sidecar `templateFiles[]` + top-level
-  // `containerTemplateFiles[]`).  Same value-bag as everything else, same
-  // precedence (env-file > process.env > prompts) via resolveValue.
-  // Anything still missing renders as empty string + warn — and if the
-  // resulting template is missing values, we refuse the write rather than
-  // emit a half-broken security-critical config (e.g. empty $wgSecretKey).
-  interface RenderedTemplate {
-    path: string;
-    content: string;
-    mode: number;
-    /** Names of vars referenced by the template that had no value. */
-    missing: string[];
-    /** Where this came from — for the warning text. */
-    origin: string;
-  }
-  const renderedTemplates: RenderedTemplate[] = [];
-  // Build the lookup bag once, deterministically — the same precedence
-  // resolveValue would apply if asked per-name.  Used because template
-  // rendering walks ALL `${VAR}` matches in the body, not a known list.
-  const valueBag: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && v !== '') valueBag[k] = v;
-  }
-  for (const [k, v] of Object.entries(envFileValues)) {
-    if (v !== '') valueBag[k] = v;  // env-file overrides process.env
-  }
-  for (const [k, v] of Object.entries(collectedValues)) {
-    if (v !== '' && valueBag[k] === undefined) valueBag[k] = v;  // prompts only fill gaps
-  }
-  for (const svc of sidecars) {
-    for (const tf of svc.templateFiles ?? []) {
-      const { rendered, missing } = renderTemplate(tf.template, valueBag);
-      const mode = tf.mode ? parseInt(tf.mode, 8) : 0o644;
-      warnIfRestrictiveTemplateMode(mode, `services[${svc.name}].templateFiles[${tf.path}]`);
-      renderedTemplates.push({
-        path: tf.path,
-        content: rendered,
-        mode,
-        missing,
-        origin: `services[${svc.name}].templateFiles[${tf.path}]`,
-      });
-    }
-  }
+  // `containerTemplateFiles[]`) — assembly shared with the host backend.
+  // Docker placement: `<outDir>/<relPath>`, with runtime-rendered files as
+  // `<relPath>.tmpl` for the image entrypoint's start-time envsubst.
+  const valueBag = buildValueBag(plan);
+  const runtimeFiles = renderRuntimeFiles(plan, valueBag);
+  const renderedTemplates = runtimeFiles.map((f) => ({
+    path: f.runtime ? `${f.relPath}.tmpl` : f.relPath,
+    content: f.content,
+    mode: f.mode,
+    missing: f.missing,
+    origin: f.origin,
+  }));
 
-  // Top-level containerTemplateFiles — generated config files cook
-  // bind-mounts into the agent container.  Same render path; compose
-  // generator emits the bind volume.  Named distinctly from per-sidecar
-  // `templateFiles` (which uses `path`-only shape).
-  //
-  // runtimeRender entries skip cook-time substitution entirely — the
-  // template body is written verbatim with `${VAR}` placeholders intact,
-  // and the host filename gets a `.tmpl` suffix.  The conhost entrypoint
-  // runs envsubst at container start to fill values that only exist at
-  // runtime (e.g. a bot password generated by a bootstrap sidecar).
-  //
-  // runtimeVars entries do cook-time substitution for EVERY var EXCEPT
-  // those named — those stay as literal `${NAME}` for the entrypoint to
-  // fill.  POSIX envsubst doesn't understand `${VAR:-default}`, so this
-  // is the right shape when most placeholders need defaults (which only
-  // cook's substituter handles) and only a small set is truly runtime-only.
-  const containerTemplateFiles = parentWalk.recipe.containerTemplateFiles ?? [];
-  for (const tf of containerTemplateFiles) {
-    const mode = tf.mode ? parseInt(tf.mode, 8) : 0o644;
-    const originBase = `containerTemplateFiles[${tf.hostPath} → ${tf.inContainer}]`;
-    const runtimeVars = tf.runtimeVars ?? [];
-    if (tf.runtimeRender && runtimeVars.length === 0) {
-      // Full-file passthrough — no substitution at cook time.
-      warnIfRestrictiveTemplateMode(mode, `containerTemplateFiles[${tf.hostPath}]`);
-      renderedTemplates.push({
-        path: `${tf.hostPath}.tmpl`,
-        content: tf.template,
-        mode,
-        missing: [],
-        origin: `${originBase} (runtimeRender)`,
-      });
-    } else if (runtimeVars.length > 0) {
-      // Partial — substitute everything except the runtimeVars list.
-      // protectedVars makes renderTemplate emit literal `${NAME}` for
-      // those names so the conhost entrypoint can envsubst them at
-      // startup; everything else (including `${VAR:-default}` forms)
-      // gets resolved here at cook time.
-      const { rendered, missing } = renderTemplate(tf.template, valueBag, {
-        protectedVars: runtimeVars,
-      });
-      warnIfRestrictiveTemplateMode(mode, `containerTemplateFiles[${tf.hostPath}]`);
-      renderedTemplates.push({
-        path: `${tf.hostPath}.tmpl`,
-        content: rendered,
-        mode,
-        missing,
-        origin: `${originBase} (runtimeVars=[${runtimeVars.join(',')}])`,
-      });
-    } else {
-      const { rendered, missing } = renderTemplate(tf.template, valueBag);
-      warnIfRestrictiveTemplateMode(mode, `containerTemplateFiles[${tf.hostPath}]`);
-      renderedTemplates.push({
-        path: tf.hostPath,
-        content: rendered,
-        mode,
-        missing,
-        origin: originBase,
-      });
-    }
-  }
-
-  // Refuse to write incomplete templates by default.  Operators can
-  // override with --allow-incomplete-templates if they actually want a
-  // template with empty `${VAR}` substitutions (rare; useful for
-  // bootstrapping or debugging).  This catches the security-critical
-  // case where `${WIKI_SECRET_KEY}` would render as empty and produce
-  // a MediaWiki with a predictable secret key.
-  const incompleteTemplates = renderedTemplates.filter((t) => t.missing.length > 0);
-  if (incompleteTemplates.length > 0 && !options.allowIncompleteTemplates) {
-    log.error(
-      `${incompleteTemplates.length} template${incompleteTemplates.length === 1 ? '' : 's'} ` +
-      `would render with EMPTY values for required variables — this is almost certainly insecure ` +
-      `(e.g. an empty MediaWiki secret key produces predictable CSRF tokens).  Refusing to write.`,
-    );
-    for (const t of incompleteTemplates) {
-      log.error(`    ${t.origin}: missing ${t.missing.join(', ')}`);
-    }
-    log.error(
-      `Either set the missing values (process.env, --env-file, or interactive prompt) ` +
-      `or pass --allow-incomplete-templates to write them anyway.`,
-    );
+  if (!enforceCompleteTemplates(runtimeFiles, options.allowIncompleteTemplates)) {
     return { exitCode: 2, outDir };
-  }
-  // Even when allowed, surface a clear warning per affected template.
-  for (const t of incompleteTemplates) {
-    log.warn(
-      `${t.origin}: WROTE INSECURE — ${t.missing.length} variable${t.missing.length === 1 ? '' : 's'} ` +
-      `unset, rendered as empty: ${t.missing.join(', ')}`,
-    );
   }
 
   // +1 for connectome.lock.
@@ -444,14 +289,18 @@ export async function runDockerBackend(
     }
 
     // connectome.lock — record of the materialization; `cook run` launches
-    // from it without re-resolving. Commits stay undefined until --pin-refs
-    // lands (the image clones at build time, not cook time).
+    // from it without re-resolving. Component commits are present when the
+    // build was pinned (--pin-refs).
     const lock: Lockfile = {
       version: 1,
       backend: 'docker',
       recipePath: plan.recipePath,
       createdAt: new Date().toISOString(),
-      connectomeHost: { url: DEFAULT_CH_REPO_URL, ref: DEFAULT_CH_REF },
+      connectomeHost: {
+        url: DEFAULT_CH_REPO_URL,
+        ref: DEFAULT_CH_REF,
+        ...(options.pinnedChRef !== undefined ? { commit: options.pinnedChRef } : {}),
+      },
       components: sources
         .filter((s) => s.install.kind !== 'sibling-copy')
         .map((s) => ({
@@ -461,6 +310,7 @@ export async function runDockerBackend(
           ref: s.ref,
           path: s.inContainerPath,
           install: s.install.kind,
+          ...(s.commit !== undefined ? { commit: s.commit } : {}),
         })),
       localExtensions: localExtensions.map((ext) => ({
         name: ext.name,

@@ -4,7 +4,7 @@ Recipes in, deployments out. A CLI that takes a [connectome-host](https://github
 
 The pipeline is split in two: a backend-agnostic *resolution* step (walk the recipe tree, detect components, probe host requirements, collect env/credential values) produces an install plan; a backend materializes it. Every materialization writes a `connectome.lock` recording what was resolved, and `cook run` launches from the lock without re-resolving.
 
-> **Status:** alpha. The core pipeline works — `cook init`, `cook check`, `cook build`, `cook install`, and `cook run` all do something useful, end-to-end against the in-repo Triumvirate example. Expect rough edges around `--pin-refs`, `--json` reports, and pip-editable arg overlays. Not yet on npm.
+> **Status:** alpha. The core pipeline works — `cook init`, `cook check`, `cook build`, `cook install`, and `cook run` all do something useful, end-to-end against the in-repo Triumvirate example. Expect rough edges around `--json` reports and pip-editable arg overlays. Not yet on npm.
 
 ## Install
 
@@ -94,6 +94,27 @@ For code that must link against things already on the machine:
 Cook probes the candidates, suggests the first hit, lets you confirm or
 override, and exposes the answer as `$SPRING_HOME` — usable in recipe
 `${VAR}` references and install steps, and recorded in the lock.
+
+### Sidecars in host mode
+
+`cook install` supports recipes with sidecar `services` and
+`containerTemplateFiles`: the agent process runs natively, but sidecars
+(databases, wikis) run under docker via a generated
+`docker-compose.sidecars.yml`. `run.sh` brings them up with
+`docker compose up -d --wait` before exec'ing the agent, renders
+runtime templates with `envsubst` (needs `gettext-base`), and honors
+`COOK_SKIP_SIDECARS=1`. One networking caveat, warned about at install
+time: the native agent reaches sidecars via their **published localhost
+ports** — compose service names only resolve inside the docker network.
+
+### Pinned builds
+
+`--pin-refs` (on `build` and `install`) resolves every branch/tag ref —
+components and connectome-host itself — to its current commit SHA via
+`git ls-remote` at cook time. The SHA is baked into clone/checkout steps
+(and the `CH_REF` build-arg default) and recorded in `connectome.lock`,
+so rebuilding later reproduces the exact trees. Unresolvable refs (offline,
+private repos) warn and stay symbolic.
 
 ### Templates
 

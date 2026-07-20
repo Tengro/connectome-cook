@@ -20,6 +20,7 @@ import {
   DEFAULT_CH_REPO_URL,
   runHostBackend,
 } from './backends/host.js';
+import { pinSources, resolveRemoteRef } from './pin-refs.js';
 import { listTemplates, scaffoldRecipe, type TemplateName } from './init.js';
 
 const pkg = JSON.parse(
@@ -59,7 +60,7 @@ ${log.bold('Flags:')}
   --image-name <name>    Override the generated image name
   --no-prompts           Non-interactive; warn-and-continue on missing values
   --env-file <path>      Read variable values from this file before prompting
-  --pin-refs             Resolve branch refs to current SHAs (Phase 4)
+  --pin-refs             Resolve branch refs to commit SHAs (reproducible build)
   --allow-incomplete-templates
                          Write templated config files even when \${VAR}
                          references render as empty.  Default: refuse the
@@ -109,10 +110,6 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     return { exitCode: 1, outDir: '' };
   }
 
-  if (flags['pin-refs']) {
-    log.warn('--pin-refs: not yet implemented; branch refs baked literally');
-  }
-
   const planResult = await resolvePlan(recipePath, {
     strict: !!flags.strict,
     noPrompts: flags.prompts === false,
@@ -120,6 +117,21 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
   });
   if (!planResult.ok) {
     return { exitCode: planResult.exitCode, outDir: '' };
+  }
+
+  // --pin-refs: resolve branch refs to SHAs before generation so the
+  // Dockerfile checks out exact commits and the lock records them.
+  let pinnedChRef: string | undefined;
+  if (flags['pin-refs']) {
+    log.step('pinning refs (git ls-remote)');
+    pinSources(planResult.plan.sources);
+    const chSha = resolveRemoteRef(DEFAULT_CH_REPO_URL, DEFAULT_CH_REF);
+    if (chSha) {
+      pinnedChRef = chSha;
+      log.info(`--pin-refs: connectome-host@${DEFAULT_CH_REF} → ${chSha.slice(0, 12)}`);
+    } else {
+      log.warn(`--pin-refs: could not resolve connectome-host@${DEFAULT_CH_REF} — CH_REF left symbolic`);
+    }
   }
 
   const outDir = resolve(flags.out ?? defaultOutDir(planResult.plan.parentWalk.recipe));
@@ -130,6 +142,7 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     strict: !!flags.strict,
     imageName: flags['image-name'],
     pinRefs: !!flags['pin-refs'],
+    ...(pinnedChRef !== undefined ? { pinnedChRef } : {}),
     allowIncompleteTemplates: !!flags['allow-incomplete-templates'],
   });
 }
@@ -154,6 +167,10 @@ ${log.bold('Flags:')}
   --strict               Fail if any MCP server / extension can't be materialized
   --no-prompts           Non-interactive (requires --yes to actually install)
   --yes                  Skip the confirm gate
+  --pin-refs             Resolve branch refs to commit SHAs before cloning
+  --allow-incomplete-templates
+                         Write templated config files even when \${VAR}
+                         references render as empty (default: refuse)
   --env-file <path>      Read variable values from this file before prompting
   --ch-repo <url>        connectome-host repo (default: ${DEFAULT_CH_REPO_URL})
   --ch-ref <ref>         connectome-host ref (default: ${DEFAULT_CH_REF})
@@ -162,7 +179,7 @@ ${log.bold('Flags:')}
 
 async function handleInstall(argv: string[]): Promise<number> {
   const flags = mri(argv, {
-    boolean: ['help', 'strict', 'yes'],
+    boolean: ['help', 'strict', 'yes', 'pin-refs', 'allow-incomplete-templates'],
     string: ['out', 'env-file', 'ch-repo', 'ch-ref'],
     alias: { h: 'help' },
   });
@@ -186,6 +203,24 @@ async function handleInstall(argv: string[]): Promise<number> {
   });
   if (!planResult.ok) return planResult.exitCode;
 
+  const chRepoUrl = flags['ch-repo'] ?? DEFAULT_CH_REPO_URL;
+  const chRef = flags['ch-ref'] ?? DEFAULT_CH_REF;
+
+  // --pin-refs: resolve every symbolic ref (components + connectome-host)
+  // to a SHA before executing; clones check out the exact commits.
+  let chCommit: string | undefined;
+  if (flags['pin-refs']) {
+    log.step('pinning refs (git ls-remote)');
+    pinSources(planResult.plan.sources);
+    const chSha = resolveRemoteRef(chRepoUrl, chRef);
+    if (chSha) {
+      chCommit = chSha;
+      log.info(`--pin-refs: connectome-host@${chRef} → ${chSha.slice(0, 12)}`);
+    } else {
+      log.warn(`--pin-refs: could not resolve connectome-host@${chRef} — left unpinned`);
+    }
+  }
+
   const installDir = resolve(
     flags.out
       ?? join(homedir(), '.connectome', 'installs', slugify(planResult.plan.parentWalk.recipe.name)),
@@ -194,8 +229,10 @@ async function handleInstall(argv: string[]): Promise<number> {
     installDir,
     noPrompts: flags.prompts === false,
     yes: !!flags.yes,
-    chRepoUrl: flags['ch-repo'] ?? DEFAULT_CH_REPO_URL,
-    chRef: flags['ch-ref'] ?? DEFAULT_CH_REF,
+    chRepoUrl,
+    chRef,
+    ...(chCommit !== undefined ? { chCommit } : {}),
+    allowIncompleteTemplates: !!flags['allow-incomplete-templates'],
   });
   return result.exitCode;
 }

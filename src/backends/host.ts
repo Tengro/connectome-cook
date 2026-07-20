@@ -34,14 +34,21 @@
 
 import { execFileSync, execSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import promptsLib from 'prompts';
 import { log } from '../log.js';
 import type { GeneratorInput, McpSource } from '../types.js';
 import type { Recipe } from '../vendor/recipe.js';
 import type { InstallPlan } from '../plan.js';
 import { generateOverlays } from '../generators/overlay.js';
+import { generateSidecarCompose } from '../generators/compose.js';
 import { lowerToConfiguration, recipeFilename } from '../configuration.js';
+import {
+  buildValueBag,
+  collectSidecarSecretFiles,
+  enforceCompleteTemplates,
+  renderRuntimeFiles,
+} from './runtime-files.js';
 import { serializeCredentialFile } from '../credentials.js';
 import {
   LOCKFILE_NAME,
@@ -62,6 +69,11 @@ export interface HostBackendOptions {
   /** connectome-host clone source. */
   chRepoUrl: string;
   chRef: string;
+  /** Pinned connectome-host commit (--pin-refs). */
+  chCommit?: string;
+  /** Write templated config files even when `${VAR}` references render
+   *  empty (default: refuse the install). */
+  allowIncompleteTemplates: boolean;
 }
 
 export { DEFAULT_CH_REF, DEFAULT_CH_REPO_URL } from '../generators/dockerfile.js';
@@ -75,6 +87,8 @@ export interface CloneAction {
   role: 'mcp' | 'extension' | 'connectome-host';
   url: string;
   ref: string;
+  /** Pinned commit (--pin-refs): checked out instead of the branch tip. */
+  commit?: string;
   /** Absolute host directory the clone lands in. */
   target: string;
   /** Shell command(s) run inside `target` after clone; empty = clone only. */
@@ -137,6 +151,7 @@ export function planHostActions(plan: InstallPlan, options: HostBackendOptions):
     ref: options.chRef,
     target: join(options.installDir, 'app'),
     buildCommand: 'bun install',
+    ...(options.chCommit !== undefined ? { commit: options.chCommit } : {}),
   });
 
   for (const source of plan.sources) {
@@ -166,6 +181,7 @@ export function planHostActions(plan: InstallPlan, options: HostBackendOptions):
       ref: source.ref,
       target: hostPathFor(options.installDir, source.inContainerPath),
       buildCommand: hostBuildCommand(source),
+      ...(source.commit !== undefined ? { commit: source.commit } : {}),
       ...(source.authSecret !== undefined ? { authSecret: source.authSecret } : {}),
       ...(source.sslBypass !== undefined ? { sslBypass: source.sslBypass } : {}),
     });
@@ -267,7 +283,13 @@ function executeClone(action: CloneAction, values: Record<string, string>): { co
       cwd: action.target, stdio: ['ignore', 'inherit', 'inherit'],
     });
   }
-  if (action.ref && action.ref !== 'main') {
+  if (action.commit) {
+    // Pinned build: check out the exact SHA the operator resolved at cook
+    // time, regardless of where the branch tip has moved since.
+    execFileSync('git', ['checkout', action.commit], {
+      cwd: action.target, stdio: ['ignore', 'inherit', 'inherit'],
+    });
+  } else if (action.ref && action.ref !== 'main') {
     if (action.ref.startsWith('refs/')) {
       execFileSync('git', ['fetch', 'origin', `${action.ref}:cook-install-checkout`], {
         cwd: action.target, stdio: ['ignore', 'inherit', 'inherit'],
@@ -300,6 +322,43 @@ function executeClone(action: CloneAction, values: Record<string, string>): { co
   return { ...(commit !== undefined ? { commit } : {}) };
 }
 
+/** Warn when operator values or recipe defaults address a sidecar by its
+ *  compose service name — that resolves inside the docker network only; the
+ *  native agent must use the published localhost port instead. */
+function warnServiceNameNetworking(
+  plan: InstallPlan,
+  renderedFiles: Array<{ origin: string; content: string }>,
+): void {
+  const serviceNames = (plan.parentWalk.recipe.services ?? []).map((s) => s.name);
+  if (serviceNames.length === 0) return;
+  const hits = new Set<string>();
+  const scan = (name: string, value: string | undefined) => {
+    if (!value) return;
+    for (const svc of serviceNames) {
+      if (value.includes(`://${svc}`) || value.includes(`@${svc}:`) || value === svc) {
+        hits.add(`${name} → "${value}" (references service "${svc}")`);
+      }
+    }
+  };
+  for (const [k, v] of Object.entries(plan.values)) scan(k, v);
+  for (const v of plan.envVars) scan(v.name, v.defaultValue);
+  // Rendered config bodies too — a baked `redis://kvstore` in a container
+  // template is the same trap, one hop removed.
+  for (const f of renderedFiles) {
+    for (const svc of serviceNames) {
+      if (f.content.includes(`://${svc}`) || f.content.includes(`@${svc}:`)) {
+        hits.add(`${f.origin} (rendered content references service "${svc}")`);
+      }
+    }
+  }
+  for (const hit of hits) {
+    log.warn(
+      `host networking: ${hit} — compose service names only resolve inside the docker network; ` +
+      `the native agent must use the sidecar's published localhost port (e.g. http://localhost:<port>).`,
+    );
+  }
+}
+
 /** Shell-safe single-quoted value for the sourceable .env. */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -311,8 +370,22 @@ function renderShellEnvFile(values: Record<string, string>): string {
     + (keys.length ? '\n' : '');
 }
 
-function renderLauncher(parentRecipeBasename: string): string {
-  return [
+export const SIDECAR_COMPOSE_FILENAME = 'docker-compose.sidecars.yml';
+
+export interface LauncherEnvsubst {
+  /** installDir-relative .tmpl source. */
+  tmpl: string;
+  /** installDir-relative render target. */
+  target: string;
+  /** chmod mode (octal string, e.g. "644"). */
+  mode: string;
+}
+
+export function renderLauncher(
+  parentRecipeBasename: string,
+  opts: { hasSidecars: boolean; envsubstFiles: LauncherEnvsubst[] },
+): string {
+  const lines = [
     '#!/usr/bin/env bash',
     '# Generated by connectome-cook (host backend). Launches the deployment.',
     'set -euo pipefail',
@@ -320,12 +393,42 @@ function renderLauncher(parentRecipeBasename: string): string {
     'if [ -f ./.env ]; then',
     '  set -a; . ./.env; set +a',
     'fi',
+  ];
+  if (opts.hasSidecars) {
+    lines.push(
+      '',
+      '# Sidecar services run under docker (the agent itself runs natively).',
+      '# --wait blocks until services are running/healthy and one-shot',
+      '# bootstrap services have exited successfully. COOK_SKIP_SIDECARS=1',
+      '# skips this (e.g. when sidecars are managed out-of-band).',
+      `if [ "\${COOK_SKIP_SIDECARS:-0}" != "1" ]; then`,
+      `  docker compose -f ${SIDECAR_COMPOSE_FILENAME} up -d --wait`,
+      'fi',
+    );
+  }
+  if (opts.envsubstFiles.length > 0) {
+    lines.push(
+      '',
+      '# Runtime-rendered config templates: values that only exist at start',
+      '# time (e.g. a bootstrap-generated bot password) are substituted here.',
+      'command -v envsubst >/dev/null 2>&1 || {',
+      '  echo "run.sh: envsubst not found — install gettext (apt: gettext-base)" >&2; exit 1;',
+      '}',
+    );
+    for (const f of opts.envsubstFiles) {
+      lines.push(`envsubst < "${f.tmpl}" > "${f.target}"`);
+      lines.push(`chmod ${f.mode} "${f.target}"`);
+    }
+  }
+  lines.push(
+    '',
     'export DATA_DIR="${DATA_DIR:-$PWD/data}"',
     'mkdir -p "$DATA_DIR"',
     'cd app',
     `exec bun src/index.ts "../recipes/${parentRecipeBasename}" "$@"`,
     '',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /** Materialize the plan onto the host. */
@@ -334,24 +437,19 @@ export async function runHostBackend(
   options: HostBackendOptions,
 ): Promise<BuildResult> {
   const installDir = options.installDir;
-
-  // Fail fast on recipe features the host backend cannot materialize yet.
-  // Sidecar services / rendered container templates are compose concepts;
-  // silently dropping them would ship a stack missing its database with no
-  // warning (the docker backend renders all of these).
   const parent = plan.parentWalk.recipe;
-  if ((parent.services ?? []).length > 0) {
-    log.error(
-      `recipe declares ${parent.services!.length} sidecar service(s) — the host backend cannot ` +
-      `materialize sidecars (yet). Use \`cook build\` (docker) for this recipe.`,
-    );
-    return { exitCode: 2, outDir: installDir };
-  }
-  if ((parent.containerTemplateFiles ?? []).length > 0) {
-    log.error(
-      `recipe declares containerTemplateFiles — the host backend does not render container ` +
-      `templates (yet). Use \`cook build\` (docker) for this recipe.`,
-    );
+  const hasSidecars = (parent.services ?? []).length > 0;
+
+  // Runtime files (sidecar templateFiles + containerTemplateFiles) render
+  // BEFORE the confirm gate — an incomplete-template refusal shouldn't
+  // waste clones. Placement differs from docker: sidecar templates land at
+  // <installDir>/<relPath> (the sidecars-only compose resolves relative
+  // bind sources against the install dir), container templates directly at
+  // the REBASED inContainer path (no mount on host — the agent reads the
+  // real file), runtime-rendered ones as `.tmpl` for run.sh's envsubst.
+  const valueBag = buildValueBag(plan);
+  const runtimeFiles = renderRuntimeFiles(plan, valueBag);
+  if (!enforceCompleteTemplates(runtimeFiles, options.allowIncompleteTemplates)) {
     return { exitCode: 2, outDir: installDir };
   }
 
@@ -522,10 +620,75 @@ export async function runHostBackend(
       writeFileSync(target, serializeCredentialFile(cf, values), { mode });
     }
 
+    // Sidecar secret files — same file-per-secret shape as docker; the
+    // sidecars-only compose references them relative to the install dir.
+    for (const sec of collectSidecarSecretFiles(
+      plan,
+      new Set(),
+      `hand-place the file (mode 0600) in ${installDir} before launching`,
+    )) {
+      writeFileSync(join(installDir, sec.name), sec.value, { mode: 0o600 });
+    }
+
+    // Rendered runtime files. Guard every write against path escape — the
+    // rel paths come from the recipe.
+    const envsubstFiles: LauncherEnvsubst[] = [];
+    const writeWithin = (target: string, content: string, mode: number) => {
+      const resolved = resolve(target);
+      if (resolved !== resolve(installDir) && !resolved.startsWith(resolve(installDir) + '/')) {
+        throw new Error(`rendered file "${target}" resolves outside the install dir — refusing to write`);
+      }
+      mkdirSync(resolve(resolved, '..'), { recursive: true });
+      writeFileSync(resolved, content, { mode });
+    };
+    for (const f of runtimeFiles) {
+      if (f.kind === 'sidecar-template') {
+        writeWithin(join(installDir, f.relPath), f.content, f.mode);
+        continue;
+      }
+      // container-template: the agent reads the real path — rebased onto
+      // the install dir (recipes' inContainer paths are container-absolute).
+      const target = hostPathFor(installDir, f.inContainer!);
+      if (f.runtime) {
+        writeWithin(`${target}.tmpl`, f.content, f.mode);
+        envsubstFiles.push({
+          tmpl: relative(installDir, `${target}.tmpl`),
+          target: relative(installDir, target),
+          mode: f.mode.toString(8),
+        });
+      } else {
+        writeWithin(target, f.content, f.mode);
+      }
+    }
+
+    // Sidecars-only compose file (agent runs natively; databases don't).
+    const sidecarCompose = generateSidecarCompose({
+      walks: plan.walks,
+      sources: [],
+      envVars: plan.envVars,
+      options: {
+        outDir: installDir,
+        noPrompts: options.noPrompts,
+        strict: plan.options.strict,
+        pinRefs: false,
+      },
+    });
+    if (sidecarCompose !== null) {
+      writeFileSync(join(installDir, SIDECAR_COMPOSE_FILENAME), sidecarCompose);
+      warnServiceNameNetworking(
+        plan,
+        runtimeFiles.filter((f) => f.kind === 'container-template'),
+      );
+    }
+
     if (Object.keys(plan.values).length > 0) {
       writeFileSync(join(installDir, '.env'), renderShellEnvFile(plan.values), { mode: 0o600 });
     }
-    writeFileSync(join(installDir, 'run.sh'), renderLauncher(parentRecipeBasename), { mode: 0o755 });
+    writeFileSync(
+      join(installDir, 'run.sh'),
+      renderLauncher(parentRecipeBasename, { hasSidecars, envsubstFiles }),
+      { mode: 0o755 },
+    );
 
     const lock: Lockfile = {
       version: 1,
