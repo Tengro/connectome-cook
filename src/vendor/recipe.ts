@@ -228,6 +228,28 @@ export interface RecipeFleetChild {
   autoRestart?: boolean;
 }
 
+/**
+ * A host-machine discovery requirement — "link against the existing mess on
+ * the machine". Cook probes the candidate paths, asks the operator to
+ * confirm/override, and exposes the answer as an env var the recipe (and
+ * install steps) can reference via `${VAR}`. Build-tooling-only: the runtime
+ * loader ignores this block (values arrive as ordinary env vars).
+ */
+export interface RecipeRequirement {
+  /** Candidate paths to probe, in order; `~` and `$VAR`/`${VAR}` expand
+   *  against the operator's environment. First existing path wins as the
+   *  suggested default. */
+  probe?: string[];
+  /** Operator-facing prompt text (defaults to the requirement key). */
+  prompt?: string;
+  /** Env var name the resolved value is exposed as. Defaults to the
+   *  requirement key upper-snake-cased (`spring-engine` → `SPRING_ENGINE`). */
+  exposeAs?: string;
+  /** When true (default), an unresolved requirement fails the build;
+   *  when false it warns and the var stays unset. */
+  required?: boolean;
+}
+
 export interface Recipe {
   name: string;
   description?: string;
@@ -237,6 +259,8 @@ export interface Recipe {
   modules?: RecipeModules;
   /** Deployment-specific code extensions, keyed by a human-readable name. */
   extensions?: Record<string, RecipeExtension>;
+  /** Host-machine discovery requirements, keyed by a human-readable name. */
+  requirements?: Record<string, RecipeRequirement>;
   sessionNaming?: { examples?: string[] };
   /** Sidecar services that build/deploy tooling includes alongside the agent
    *  process (databases, viewers, search engines, reverse proxies).  Loader
@@ -534,6 +558,34 @@ export function validateRecipe(raw: unknown): Recipe {
         }
       }
       if (ext.kind === 'strategy') hasStrategyExtension = true;
+    }
+  }
+
+  // Requirements block — host-machine discovery. Build-tooling-only.
+  if (obj.requirements !== undefined) {
+    if (!obj.requirements || typeof obj.requirements !== 'object' || Array.isArray(obj.requirements)) {
+      throw new Error('Recipe "requirements" must be an object mapping names to requirement entries.');
+    }
+    for (const [name, entry] of Object.entries(obj.requirements as Record<string, unknown>)) {
+      if (!name) throw new Error('Recipe requirements keys must be non-empty names.');
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`requirements.${name} must be an object`);
+      }
+      const req = entry as Record<string, unknown>;
+      if (req.probe !== undefined) {
+        if (!Array.isArray(req.probe) || !(req.probe as unknown[]).every((p) => typeof p === 'string' && p)) {
+          throw new Error(`requirements.${name}.probe must be an array of non-empty strings`);
+        }
+      }
+      if (req.prompt !== undefined && typeof req.prompt !== 'string') {
+        throw new Error(`requirements.${name}.prompt must be a string`);
+      }
+      if (req.exposeAs !== undefined && (typeof req.exposeAs !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(req.exposeAs))) {
+        throw new Error(`requirements.${name}.exposeAs must be a valid env var name`);
+      }
+      if (req.required !== undefined && typeof req.required !== 'boolean') {
+        throw new Error(`requirements.${name}.required must be a boolean`);
+      }
     }
   }
 

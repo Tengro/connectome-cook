@@ -2,7 +2,8 @@ import mri from 'mri';
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { log } from './log.js';
 import { slugify } from './slug.js';
 import type { SubcommandHandler } from './types.js';
@@ -13,6 +14,11 @@ import { detectExtensions } from './extension-detector.js';
 import { collectEnvVars } from './env-collector.js';
 import { resolvePlan } from './plan.js';
 import { runDockerBackend, type BuildResult } from './backends/docker.js';
+import {
+  DEFAULT_CH_REF,
+  DEFAULT_CH_REPO_URL,
+  runHostBackend,
+} from './backends/host.js';
 import { listTemplates, scaffoldRecipe, type TemplateName } from './init.js';
 
 const pkg = JSON.parse(
@@ -29,6 +35,7 @@ ${log.bold('Usage:')}
 
 ${log.bold('Commands:')}
   build <recipe>         Generate Docker artifacts for a recipe
+  install <recipe>       Install directly onto this machine (no docker)
   run <recipe>           Build, then \`docker compose up\`
   check <recipe>         Validate a recipe without writing files
   init <name>            Scaffold a starter recipe
@@ -124,6 +131,72 @@ async function runBuildPipeline(argv: string[]): Promise<BuildResult> {
     pinRefs: !!flags['pin-refs'],
     allowIncompleteTemplates: !!flags['allow-incomplete-templates'],
   });
+}
+
+const INSTALL_USAGE = `${log.bold('cook install')} — install a recipe directly onto this machine (no docker).
+
+${log.bold('Usage:')}
+  cook install <recipe-path-or-url> [flags]
+
+Clones and builds every component (connectome-host, MCP servers, extensions)
+under the install dir, resolves host requirements (probe + confirm), writes
+the lowered configurations, a sourceable .env, a run.sh launcher, and
+${log.dim('connectome.lock')}.  Re-running reconciles: components unchanged in the
+lock are kept, everything else is re-cloned.
+
+${log.bold('SAFETY:')} unlike \`cook build\`, install commands run ON THIS MACHINE.
+The full action plan is printed and confirmed first.  Non-interactive runs
+(--no-prompts) additionally require ${log.bold('--yes')}.
+
+${log.bold('Flags:')}
+  --out <dir>            Install directory (default: ~/.connectome/installs/<name>)
+  --strict               Fail if any MCP server / extension can't be materialized
+  --no-prompts           Non-interactive (requires --yes to actually install)
+  --yes                  Skip the confirm gate
+  --env-file <path>      Read variable values from this file before prompting
+  --ch-repo <url>        connectome-host repo (default: ${DEFAULT_CH_REPO_URL})
+  --ch-ref <ref>         connectome-host ref (default: ${DEFAULT_CH_REF})
+  --help, -h             Show this message
+`;
+
+async function handleInstall(argv: string[]): Promise<number> {
+  const flags = mri(argv, {
+    boolean: ['help', 'strict', 'yes'],
+    string: ['out', 'env-file', 'ch-repo', 'ch-ref'],
+    alias: { h: 'help' },
+  });
+
+  if (flags.help) {
+    process.stdout.write(INSTALL_USAGE);
+    return 0;
+  }
+
+  const [recipePath] = flags._ as string[];
+  if (!recipePath) {
+    log.error('install: missing recipe path');
+    process.stderr.write(`\n${INSTALL_USAGE}`);
+    return 1;
+  }
+
+  const planResult = await resolvePlan(recipePath, {
+    strict: !!flags.strict,
+    noPrompts: flags.prompts === false,
+    envFile: flags['env-file'],
+  });
+  if (!planResult.ok) return planResult.exitCode;
+
+  const installDir = resolve(
+    flags.out
+      ?? join(homedir(), '.connectome', 'installs', slugify(planResult.plan.parentWalk.recipe.name)),
+  );
+  const result = await runHostBackend(planResult.plan, {
+    installDir,
+    noPrompts: flags.prompts === false,
+    yes: !!flags.yes,
+    chRepoUrl: flags['ch-repo'] ?? DEFAULT_CH_REPO_URL,
+    chRef: flags['ch-ref'] ?? DEFAULT_CH_REF,
+  });
+  return result.exitCode;
 }
 
 async function handleBuild(argv: string[]): Promise<number> {
@@ -331,6 +404,7 @@ async function handleInit(argv: string[]): Promise<number> {
 
 const SUBCOMMANDS: Record<string, SubcommandHandler> = {
   build: handleBuild,
+  install: handleInstall,
   run: handleRun,
   check: handleCheck,
   init: handleInit,

@@ -42,6 +42,11 @@ import {
   resolveFieldValue,
   type CredentialFileSpec,
 } from './credentials.js';
+import {
+  enforceRequirements,
+  resolveRequirements,
+  type ResolvedRequirement,
+} from './requirements.js';
 
 export interface PlanOptions {
   /** Fail on any MCP server / extension cook can't bake. */
@@ -70,6 +75,9 @@ export interface InstallPlan {
   runtimeOnlyVars: string[];
   /** Credential-file specs collected across the tree. */
   credentialFiles: CredentialFileSpec[];
+  /** Resolved host-machine discovery requirements (values also merged into
+   *  `values` under their exposeAs names). */
+  requirements: ResolvedRequirement[];
   /** Resolved operator values (env-file > process.env > prompts). */
   values: Record<string, string>;
   /** Raw values from --env-file (kept separate: template rendering gives
@@ -183,8 +191,35 @@ export async function resolvePlan(
       return { ok: false, exitCode: 1 };
     }
   }
-  const { found, missing } = resolvePresent(required, envFileValues);
-  let collectedValues: Record<string, string> = { ...found };
+  // Host-machine discovery (`requirements` block): probe candidate paths,
+  // confirm with the operator, expose answers as env vars. Resolved BEFORE
+  // the generic var prompt so a requirement that is also referenced as a
+  // recipe `${VAR}` is asked exactly once — the requirement prompt (which
+  // knows how to probe) wins.
+  let requirements: ResolvedRequirement[];
+  try {
+    const reqResult = await resolveRequirements(walks, {
+      noPrompts: opts.noPrompts,
+      envFileValues,
+    });
+    if (reqResult.cancelled) {
+      log.warn('cancelled by user');
+      return { ok: false, exitCode: 1 };
+    }
+    requirements = reqResult.resolved;
+    enforceRequirements(requirements);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    return { ok: false, exitCode: 2 };
+  }
+  const requirementValues: Record<string, string> = {};
+  for (const r of requirements) {
+    if (r.value !== undefined) requirementValues[r.envName] = r.value;
+  }
+
+  const { found, missing: missingRaw } = resolvePresent(required, envFileValues);
+  const missing = missingRaw.filter((v) => requirementValues[v.name] === undefined);
+  let collectedValues: Record<string, string> = { ...requirementValues, ...found };
   if (missing.length > 0) {
     if (opts.noPrompts) {
       log.warn(
@@ -253,6 +288,7 @@ export async function resolvePlan(
       envVars,
       runtimeOnlyVars: Array.from(runtimeOnlyVars),
       credentialFiles,
+      requirements,
       values: collectedValues,
       envFileValues,
       credentialValues,
