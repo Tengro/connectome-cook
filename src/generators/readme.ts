@@ -137,6 +137,25 @@ function renderWhatsInTheImage(
     }
   }
 
+  // TLS-pinned clones: name the CA bundles the build verifies against so an
+  // operator inspecting the bundle knows what ca-certs/ is for (and that it
+  // must stay next to the Dockerfile for rebuilds).
+  const caCertNames = [
+    ...new Set(
+      input.sources
+        .filter((s) => s.caCert)
+        .map((s) => `\`ca-certs/${s.caCert!.split('/').pop()}\``),
+    ),
+  ];
+  if (caCertNames.length > 0) {
+    lines.push(
+      `- **Pinned CA bundle${caCertNames.length === 1 ? '' : 's'}** — ${caCertNames.join(', ')} ` +
+      '(copied into this build context by cook; credentialed clones verify TLS against them ' +
+      'via `git -c http.sslCAInfo=...` instead of disabling verification). Keep the files ' +
+      'in place for rebuilds.',
+    );
+  }
+
   // Recipes baked in.
   if (input.walks.length > 0) {
     const recipeNames = input.walks

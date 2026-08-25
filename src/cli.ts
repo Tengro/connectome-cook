@@ -13,7 +13,7 @@ import { walkRecipe } from './walker.js';
 import { detectSources } from './source-detector.js';
 import { detectExtensions } from './extension-detector.js';
 import { collectEnvVars } from './env-collector.js';
-import { resolvePlan } from './plan.js';
+import { reportMissingCaCerts, resolvePlan } from './plan.js';
 import { runDockerBackend, type BuildResult } from './backends/docker.js';
 import {
   DEFAULT_CH_REF,
@@ -479,6 +479,10 @@ async function handleCheck(argv: string[]): Promise<number> {
       `    ${log.bold(ext.name)}  ${log.dim(`(local bundle: ${ext.hostDir} → ${ext.inContainerPath}/${ext.entryBasename})`)}\n`,
     );
   }
+
+  // TLS-pinned clones: a bad caCert path would fail the build later —
+  // surface it here so the check report can be trusted.
+  if (reportMissingCaCerts([...sources, ...detectedExts.gitExtensions])) return 2;
 
   log.step('collecting environment variables');
   const envVars = collectEnvVars(walks);

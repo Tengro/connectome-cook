@@ -10,7 +10,7 @@
  */
 
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { log } from '../log.js';
 import type { BuildOptions, GeneratorInput } from '../types.js';
 import type { Recipe } from '../vendor/recipe.js';
@@ -23,6 +23,7 @@ import { generateReadme } from '../generators/readme.js';
 import { generateEntrypoint } from '../generators/entrypoint.js';
 import { confirmWrite } from '../prompts.js';
 import { hostFilename, serializeCredentialFile } from '../credentials.js';
+import { CA_CERT_CONTEXT_DIR, collectCaCerts } from '../runtimes/index.js';
 import { lowerToConfiguration, recipeFilename } from '../configuration.js';
 import { DEFAULT_CH_REF, DEFAULT_CH_REPO_URL } from '../generators/dockerfile.js';
 import { writeLockfile, type Lockfile } from '../lockfile.js';
@@ -170,6 +171,12 @@ export async function runDockerBackend(
     );
   }
 
+  // CA bundles for TLS-pinned clones (source.caCert): copied into the build
+  // context at ca-certs/<basename> — the Dockerfile's builder stages COPY
+  // them in and point `-c http.sslCAInfo=` at the in-image copy. Deduped by
+  // resolved host path; basename collisions already threw in the generator.
+  const caCertFiles = collectCaCerts(sources);
+
   // Sidecar runtime secrets.  Sidecars are folded into the plan's prompt
   // pipeline (see resolvePlan), so by this point any value the operator was
   // going to supply is already in collectedValues.  Deduped against
@@ -204,6 +211,7 @@ export async function runDockerBackend(
     + (writeEnvFile ? 1 : 0)
     + credFilesToWrite.length
     + authSecretFiles.length
+    + caCertFiles.length
     + sidecarSecretFiles.length
     + renderedTemplates.length
     + localExtensions.length;
@@ -240,6 +248,14 @@ export async function runDockerBackend(
       // BuildKit reads the file content verbatim as the secret value —
       // no quoting, no trailing newline (some tools care).
       writeFileSync(join(outDir, sec.name), sec.value, { mode: 0o600 });
+    }
+    if (caCertFiles.length > 0) {
+      mkdirSync(join(outDir, CA_CERT_CONTEXT_DIR), { recursive: true });
+      for (const ca of caCertFiles) {
+        // Verbatim copy — the bundle is public trust material (a CA cert,
+        // not a secret), so no mode tightening is needed.
+        copyFileSync(ca.hostPath, join(outDir, ca.contextPath));
+      }
     }
     for (const sec of sidecarSecretFiles) {
       // Same file shape as build-time secrets; docker secrets reads

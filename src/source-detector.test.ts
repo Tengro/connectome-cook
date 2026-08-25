@@ -368,6 +368,66 @@ describe('detectSources — install pattern mapping', () => {
     expect(sources).toHaveLength(1);
     expect(sources[0]!.authSecret).toBe('INTERNAL_GIT_TOKEN');
     expect(sources[0]!.sslBypass).toBe(true);
+    // Unset auth/TLS extras stay unset — the clone command falls back to
+    // the historical oauth2 + (here) sslVerify=false shape.
+    expect(sources[0]!.authUsername).toBeUndefined();
+    expect(sources[0]!.caCert).toBeUndefined();
+  });
+
+  test('preserves authUsername and resolves caCert against the recipe dir', () => {
+    const walks: WalkResult[] = [
+      {
+        path: '/r/nested/auth.json',
+        recipe: {
+          name: 'a',
+          agent: { systemPrompt: 'p' },
+          mcpServers: {
+            srv: {
+              command: 'node',
+              args: [],
+              source: {
+                url: 'https://internal.example.com/private.git',
+                install: 'npm',
+                authSecret: 'DEPLOY_TOKEN',
+                authUsername: 'gitlab+deploy-token-7',
+                caCert: './certs/internal-ca.crt',
+              },
+            },
+          },
+        } as Recipe,
+      },
+    ];
+
+    const sources = detectSources(walks, { strict: true });
+    expect(sources).toHaveLength(1);
+    expect(sources[0]!.authUsername).toBe('gitlab+deploy-token-7');
+    expect(sources[0]!.caCert).toBe('/r/nested/certs/internal-ca.crt');
+  });
+
+  test('absolute caCert paths pass through unchanged', () => {
+    const walks: WalkResult[] = [
+      {
+        path: '/r/auth.json',
+        recipe: {
+          name: 'a',
+          agent: { systemPrompt: 'p' },
+          mcpServers: {
+            srv: {
+              command: 'node',
+              args: [],
+              source: {
+                url: 'https://internal.example.com/private.git',
+                install: 'npm',
+                caCert: '/etc/ssl/certs/internal-ca.pem',
+              },
+            },
+          },
+        } as Recipe,
+      },
+    ];
+
+    const sources = detectSources(walks, { strict: true });
+    expect(sources[0]!.caCert).toBe('/etc/ssl/certs/internal-ca.pem');
   });
 });
 

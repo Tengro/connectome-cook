@@ -9,6 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  cloneUrlFor,
   hostBuildCommand,
   hostPathFor,
   isSatisfiedByLock,
@@ -158,6 +159,53 @@ describe('planHostActions', () => {
     expect(preview).toContain('https://github.com/x/zulip_mcp.git');
     expect(preview).toContain('npm install --no-audit --no-fund && npm run build');
     expect(preview).toContain('token from $GIT_TOKEN');
+  });
+
+  test('propagates authUsername and caCert onto the clone action + preview', () => {
+    const plan = minimalPlan({
+      sources: [mcpSource({
+        authSecret: 'DEPLOY_TOKEN',
+        authUsername: 'gitlab+deploy-token-7',
+        caCert: '/home/op/certs/internal-ca.crt',
+      })],
+    });
+    const actions = planHostActions(plan, OPTIONS);
+    const clone = actions.clones[1]!;
+    expect(clone.authUsername).toBe('gitlab+deploy-token-7');
+    expect(clone.caCert).toBe('/home/op/certs/internal-ca.crt');
+    // connectome-host's own clone stays un-pinned — caCert is per-source.
+    expect(actions.clones[0]!.caCert).toBeUndefined();
+
+    const preview = renderActionPreview(actions, OPTIONS);
+    expect(preview).toContain('gitlab+deploy-token-7 + token from $DEPLOY_TOKEN');
+    expect(preview).toContain('TLS pinned to CA bundle: /home/op/certs/internal-ca.crt');
+  });
+});
+
+describe('cloneUrlFor', () => {
+  const base: CloneAction = {
+    key: 'k',
+    role: 'mcp',
+    url: 'https://git.internal/x/y.git',
+    ref: 'main',
+    target: '/inst/y',
+    buildCommand: '',
+  };
+
+  test('defaults to oauth2 userinfo (byte-parity with the historical shape)', () => {
+    expect(cloneUrlFor({ ...base, authSecret: 'TOK' }, { TOK: 'sekret' }))
+      .toBe('https://oauth2:sekret@git.internal/x/y.git');
+  });
+
+  test('uses authUsername when set', () => {
+    expect(cloneUrlFor(
+      { ...base, authSecret: 'TOK', authUsername: 'gitlab+deploy-token-7' },
+      { TOK: 'sekret' },
+    )).toBe('https://gitlab+deploy-token-7:sekret@git.internal/x/y.git');
+  });
+
+  test('no authSecret → URL untouched', () => {
+    expect(cloneUrlFor(base, {})).toBe('https://git.internal/x/y.git');
   });
 });
 

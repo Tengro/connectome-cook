@@ -46,6 +46,8 @@ An internal git host using a self-signed cert isn't in the container's CA bundle
 
 **For connectome-cook:** make this explicit per-source in the recipe schema (`source.sslBypass: boolean`), don't assume one or the other.
 
+**Update (Aug 2026):** the strict fix landed as `source.caCert` — a host path to the org's CA bundle, copied into the build context (`ca-certs/<basename>`) and into each pinning builder stage (`/tmp/cook-ca/<basename>`), with clones running `git -c http.sslCAInfo=...` instead of `sslVerify=false`. This natively replicates the sentinel-guarded hand-patch boter carried on cook's output (its DEPLOY.md "ath-ca.crt trust plumbing" entry). `caCert` + `sslBypass` on the same source is a validation error. Scope is per-source only: the `ch-deps` clone (`CH_REPO_URL`) stays unpinned — boter's connectome-host comes from GitHub, and pinning it would need a build-arg seam nobody has asked for. Same batch added `source.authUsername` (default `oauth2`) so GitLab deploy tokens — which authenticate with their own username — can be used for build-time clones instead of full PATs.
+
 ### 9. Build-time vs runtime auth secrets
 GITLAB_TOKEN serves dual purpose: build-time (clone internal repos) and runtime (run the gitlab MCP server). Build args leak into `docker history`; BuildKit secrets (`--mount=type=secret`) don't.
 
@@ -100,7 +102,10 @@ RecipeMcpServer.source?: {
   install?: 'npm' | 'pip-editable' | { run: string };   // build steps inside the cloned dir
   runtime?: 'node' | 'python3' | 'custom' | 'bun';  // determines apt deps + builder base image
   authSecret?: string;                      // build-arg name (e.g. "GITLAB_TOKEN")
-  sslBypass?: boolean;                      // for self-signed CAs
+  authUsername?: string;                    // clone userinfo username; default "oauth2"
+                                            // (GitLab deploy tokens need their own)
+  caCert?: string;                          // CA bundle to pin clone TLS to (sslCAInfo)
+  sslBypass?: boolean;                      // for self-signed CAs (prefer caCert)
   inContainer?: { path: string };           // override the in-container path
                                             // (defaults to /<repo-basename>/)
 };

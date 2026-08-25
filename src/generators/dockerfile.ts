@@ -66,7 +66,13 @@ import type {
   WalkResult,
 } from '../types.js';
 import type { Recipe, RecipeMcpServer, RecipeWorkspaceMount } from '../vendor/recipe.js';
-import { getRuntime, repoBasename } from '../runtimes/index.js';
+import {
+  caCertContainerPath,
+  caCertContextPath,
+  collectCaCerts,
+  getRuntime,
+  repoBasename,
+} from '../runtimes/index.js';
 import * as customRuntime from '../runtimes/custom.js';
 import * as npmRuntime from '../runtimes/npm.js';
 
@@ -116,6 +122,10 @@ export function generateDockerfile(input: GeneratorInput): string {
   );
   const persistentDirs = collectWorkspaceMountPaths(walks);
   const hasAnySecret = sources.some((s) => s.authSecret);
+  // Validates basenames + detects collisions early (throws before any file
+  // is written); the docker backend runs the same collection to copy the
+  // bundles into <outDir>/ca-certs/.
+  const hasAnyCaCert = collectCaCerts(builderSources).length > 0;
   const imageName = options.imageName ?? deriveImageName(parent.recipe);
 
   const sections: string[] = [];
@@ -128,6 +138,7 @@ export function generateDockerfile(input: GeneratorInput): string {
     siblingSources,
     localExtensions,
     hasAnySecret,
+    hasAnyCaCert,
   }));
 
   if (needsNode) {
@@ -171,10 +182,11 @@ interface HeaderArgs {
   siblingSources: McpSource[];
   localExtensions: LocalExtension[];
   hasAnySecret: boolean;
+  hasAnyCaCert: boolean;
 }
 
 function renderHeader(args: HeaderArgs): string {
-  const { imageName, parentRecipeBasename, builderSources, registrySources, siblingSources, localExtensions, hasAnySecret } = args;
+  const { imageName, parentRecipeBasename, builderSources, registrySources, siblingSources, localExtensions, hasAnySecret, hasAnyCaCert } = args;
   const lines: string[] = [];
   lines.push('# syntax=docker/dockerfile:1.7');
   lines.push('');
@@ -208,6 +220,12 @@ function renderHeader(args: HeaderArgs): string {
     lines.push('# This image consumes BuildKit secrets. Pass them at build time:');
     lines.push('#   docker build --secret id=<NAME>,env=<NAME> ...');
     lines.push('# (one --secret flag per source.authSecret in the recipe).');
+  }
+  if (hasAnyCaCert) {
+    lines.push('#');
+    lines.push('# CA-pinned clones: sources declaring source.caCert verify TLS against a');
+    lines.push('# CA bundle cook copied into ca-certs/ in this build context — TLS');
+    lines.push('# verification stays ON for those clones.');
   }
   lines.push('# ---------------------------------------------------------------------------');
   return lines.join('\n');
@@ -244,6 +262,14 @@ function renderBuilderStage(source: McpSource, stageName: string): string {
   lines.push('RUN apt-get update \\');
   lines.push(' && apt-get install -y --no-install-recommends git ca-certificates \\');
   lines.push(' && rm -rf /var/lib/apt/lists/*');
+  if (source.caCert) {
+    // Pin the clone's TLS trust to the recipe-declared CA (source.caCert):
+    // the bundle is in the build context (cook copied it to ca-certs/) and
+    // gitCloneCommand points `-c http.sslCAInfo=` at the in-image copy, so
+    // a credentialed URL never travels over unverified TLS.
+    lines.push('# CA bundle for TLS-pinned clone (source.caCert).');
+    lines.push(`COPY ${caCertContextPath(source)} ${caCertContainerPath(source)}`);
+  }
   // No WORKDIR: each runtime's installSteps clones into and operates on
   // `source.inContainerPath` (absolute) so the build artefact lands at
   // the same path the runtime stage COPYs from — pip-editable shebangs

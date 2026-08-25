@@ -79,6 +79,24 @@ describe('detectExtensions — git-sourced', () => {
     expect(ext.install).toEqual({ kind: 'custom', run: 'make engine', runtime: 'custom' });
   });
 
+  test('carries authUsername through and resolves caCert against the recipe dir', () => {
+    const result = detectExtensions([walk(join(dir, 'r.json'), {
+      skirmish: {
+        kind: 'strategy',
+        path: 'index.ts',
+        source: {
+          url: 'https://git.internal/skirmish.git',
+          authSecret: 'DEPLOY_TOKEN',
+          authUsername: 'gitlab+deploy-token-9',
+          caCert: './certs/internal-ca.crt',
+        },
+      },
+    })], { strict: false });
+    const ext = result.gitExtensions[0]!;
+    expect(ext.authUsername).toBe('gitlab+deploy-token-9');
+    expect(ext.caCert).toBe(join(dir, 'certs/internal-ca.crt'));
+  });
+
   test('dedups same-name extensions across fleet recipes', () => {
     const src = { url: 'https://github.com/x/zk.git' };
     const result = detectExtensions([

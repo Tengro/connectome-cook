@@ -19,7 +19,7 @@
  *     checkout adjacent to the recipe at build time.
  */
 
-import { basename } from 'node:path';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import type {
   InstallPattern,
   McpSource,
@@ -66,6 +66,15 @@ function defaultInContainerPath(url: string): string {
   const withoutGit = trimmed.endsWith('.git') ? trimmed.slice(0, -4) : trimmed;
   const name = basename(withoutGit);
   return `/${name}`;
+}
+
+/**
+ * Resolve a recipe-declared `source.caCert` path against the declaring
+ * recipe's directory (same rule as local-extension entry paths); absolute
+ * paths pass through. Shared with the extension detector.
+ */
+export function resolveCaCertPath(caCert: string, recipePath: string): string {
+  return isAbsolute(caCert) ? caCert : resolve(dirname(recipePath), caCert);
 }
 
 /**
@@ -207,6 +216,9 @@ function addSourcedServer(
   const key = `${normalizeUrlForKey(source.url)}@${refStr}`;
   const install = mapInstall(source.install);
   const inContainerPath = source.inContainer?.path ?? defaultInContainerPath(source.url);
+  const caCert = source.caCert !== undefined
+    ? resolveCaCertPath(source.caCert, ref.recipePath)
+    : undefined;
 
   const existing = byKey.get(key);
   if (!existing) {
@@ -218,6 +230,8 @@ function addSourcedServer(
       inContainerPath,
       refs: [ref],
       ...(source.authSecret !== undefined ? { authSecret: source.authSecret } : {}),
+      ...(source.authUsername !== undefined ? { authUsername: source.authUsername } : {}),
+      ...(caCert !== undefined ? { caCert } : {}),
       ...(source.sslBypass !== undefined ? { sslBypass: source.sslBypass } : {}),
       ...(source.systemPackages !== undefined ? { systemPackages: source.systemPackages } : {}),
     };
@@ -259,6 +273,22 @@ function addSourcedServer(
       'authSecret',
       { ref: firstRef, value: existing.authSecret ?? '(none)' },
       { ref, value: source.authSecret ?? '(none)' },
+    );
+  }
+  if ((existing.authUsername ?? 'oauth2') !== (source.authUsername ?? 'oauth2')) {
+    warnConflict(
+      key,
+      'authUsername',
+      { ref: firstRef, value: existing.authUsername ?? 'oauth2' },
+      { ref, value: source.authUsername ?? 'oauth2' },
+    );
+  }
+  if ((existing.caCert ?? '') !== (caCert ?? '')) {
+    warnConflict(
+      key,
+      'caCert',
+      { ref: firstRef, value: existing.caCert ?? '(none)' },
+      { ref, value: caCert ?? '(none)' },
     );
   }
   if (existing.inContainerPath !== inContainerPath) {

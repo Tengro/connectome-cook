@@ -30,13 +30,17 @@ export function candidateRefNames(ref: string): string[] {
 /**
  * Resolve `ref` on `url` to a commit SHA via `git ls-remote`.
  * Returns null when the remote is unreachable or the ref doesn't exist.
+ * `caCert` (absolute host path, from `source.caCert`) pins the TLS trust
+ * for servers behind an internal CA — without it ls-remote fails against
+ * such hosts and the source is merely left unpinned.
  */
-export function resolveRemoteRef(url: string, ref: string): string | null {
+export function resolveRemoteRef(url: string, ref: string, caCert?: string): string | null {
   if (looksLikeSha(ref)) return ref;
+  const sslArgs = caCert ? ['-c', `http.sslCAInfo=${caCert}`] : [];
   for (const candidate of candidateRefNames(ref)) {
     let output: string;
     try {
-      output = execFileSync('git', ['ls-remote', url, candidate], {
+      output = execFileSync('git', [...sslArgs, 'ls-remote', url, candidate], {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 30_000,
@@ -69,7 +73,7 @@ export function pinSources(sources: McpSource[]): void {
       source.commit = source.ref;
       continue;
     }
-    const sha = resolveRemoteRef(source.url, source.ref);
+    const sha = resolveRemoteRef(source.url, source.ref, source.caCert);
     if (sha) {
       source.commit = sha;
       log.info(`--pin-refs: ${log.dim(source.url)}@${source.ref} → ${sha.slice(0, 12)}`);

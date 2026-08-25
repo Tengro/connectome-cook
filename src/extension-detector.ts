@@ -38,6 +38,7 @@ import type {
   WalkResult,
 } from './types.js';
 import type { RecipeExtension, RecipeMcpServerGitSource } from './vendor/recipe.js';
+import { resolveCaCertPath } from './source-detector.js';
 
 export interface DetectExtensionsOptions {
   strict: boolean;
@@ -217,6 +218,10 @@ function addGitExtension(
     inContainerPath: `${EXTENSIONS_CONTAINER_ROOT}/${name}`,
     refs: [ref],
     ...(source.authSecret !== undefined ? { authSecret: source.authSecret } : {}),
+    ...(source.authUsername !== undefined ? { authUsername: source.authUsername } : {}),
+    ...(source.caCert !== undefined
+      ? { caCert: resolveCaCertPath(source.caCert, ref.recipePath) }
+      : {}),
     ...(source.sslBypass !== undefined ? { sslBypass: source.sslBypass } : {}),
     ...(source.systemPackages !== undefined ? { systemPackages: source.systemPackages } : {}),
   });
