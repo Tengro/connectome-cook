@@ -399,6 +399,111 @@ describe('generateDockerfile — webui module gates dist/ COPY', () => {
   });
 });
 
+describe('generateDockerfile — caCert (TLS-pinned clones)', () => {
+  function caSource(overrides: Partial<McpSource> = {}): McpSource {
+    return {
+      key: 'https://git.internal/x/notion-mcp@main',
+      url: 'https://git.internal/x/notion-mcp.git',
+      ref: 'main',
+      install: { kind: 'npm' },
+      inContainerPath: '/notion-mcp',
+      authSecret: 'GITLAB_TOKEN',
+      caCert: '/home/op/certs/internal-ca.crt',
+      refs: [{ recipePath: '/recipes/ca.json', mcpServerName: 'notion' }],
+      ...overrides,
+    };
+  }
+
+  const walks: WalkResult[] = [{
+    path: '/recipes/ca.json',
+    recipe: {
+      name: 'ca-test',
+      agent: { systemPrompt: 'p' },
+      mcpServers: { notion: { command: 'node', args: [] } },
+    } as Recipe,
+  }];
+
+  test('builder stage COPYs the CA bundle in and pins the clone to it', () => {
+    const dockerfile = generateDockerfile({
+      walks,
+      sources: [caSource()],
+      envVars: [],
+      options: defaultOptions(),
+    });
+
+    // The bundle travels build-context → builder stage before the clone.
+    expect(dockerfile).toContain('COPY ca-certs/internal-ca.crt /tmp/cook-ca/internal-ca.crt');
+    // The clone verifies against it — never disables verification.
+    expect(dockerfile).toContain(
+      'git -c http.sslCAInfo=/tmp/cook-ca/internal-ca.crt clone '
+      + '"https://oauth2:$(cat /run/secrets/GITLAB_TOKEN)@git.internal/x/notion-mcp.git" /notion-mcp',
+    );
+    expect(dockerfile).not.toContain('sslVerify=false');
+    // Header documents the mechanism for operators diffing the artifact.
+    expect(dockerfile).toContain('ca-certs/');
+  });
+
+  test('ch-deps stage is NOT CA-pinned — caCert is per-source scope', () => {
+    const dockerfile = generateDockerfile({
+      walks,
+      sources: [caSource()],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    const chDeps = dockerfile.slice(
+      dockerfile.indexOf('AS ch-deps'),
+      dockerfile.indexOf('# ---- runtime'),
+    );
+    expect(chDeps).toContain('git clone "${CH_REPO_URL}"');
+    expect(chDeps).not.toContain('sslCAInfo');
+  });
+
+  test('no caCert → no ca-certs plumbing anywhere (byte-parity guard)', () => {
+    const dockerfile = generateDockerfile({
+      walks,
+      sources: [caSource({ caCert: undefined })],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    expect(dockerfile).not.toContain('ca-certs');
+    expect(dockerfile).not.toContain('sslCAInfo');
+    expect(dockerfile).not.toContain('/tmp/cook-ca');
+  });
+
+  test('two sources with distinct same-named CA files fail fast', () => {
+    expect(() => generateDockerfile({
+      walks,
+      sources: [
+        caSource(),
+        caSource({
+          key: 'https://git.internal/x/other@main',
+          url: 'https://git.internal/x/other.git',
+          inContainerPath: '/other',
+          caCert: '/elsewhere/internal-ca.crt',
+        }),
+      ],
+      envVars: [],
+      options: defaultOptions(),
+    })).toThrow(/basename collision/);
+  });
+
+  test('authUsername lands in the builder-stage clone URL', () => {
+    const dockerfile = generateDockerfile({
+      walks,
+      sources: [caSource({
+        caCert: undefined,
+        authSecret: 'DEPLOY_TOKEN',
+        authUsername: 'gitlab+deploy-token-42',
+      })],
+      envVars: [],
+      options: defaultOptions(),
+    });
+    expect(dockerfile).toContain(
+      'git clone "https://gitlab+deploy-token-42:$(cat /run/secrets/DEPLOY_TOKEN)@git.internal/x/notion-mcp.git" /notion-mcp',
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

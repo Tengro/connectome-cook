@@ -27,6 +27,12 @@
  *   - resolveRecipeRelative() — parent-dir-relative path resolution helper,
  *     used by walker.ts to traverse fleet children
  *
+ * Cook-owned source fields (not yet upstream): `caCert` and `authUsername`
+ * on the git source shape are consumed at build time only. Cook demotes
+ * `source` to `sourceMeta` in shipped configurations, so the runtime loader
+ * never validates them; sync upstream's loader if raw recipes carrying these
+ * fields are ever fed to connectome-host directly.
+ *
  * Two deliberate divergences from upstream:
  *
  *   1. We expose loadRecipeRaw() instead of loadRecipe(). Cook needs to scan
@@ -43,7 +49,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { basename, isAbsolute, resolve } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -139,6 +145,19 @@ export interface RecipeMcpServerGitSource {
     | 'pip-editable'
     | { run: string; runtime: 'node' | 'python3' | 'custom' | 'bun' };
   authSecret?: string;
+  /** Username for the credentialed clone's URL userinfo
+   *  (`<authUsername>:<token>@host`).  Default: `oauth2` (GitLab PATs).
+   *  GitLab deploy tokens — the least-privilege option for build-time
+   *  clones — authenticate with their own username
+   *  (e.g. `gitlab+deploy-token-42`), so they need this field.
+   *  Only meaningful together with `authSecret`. */
+  authUsername?: string;
+  /** Host path to a CA bundle (PEM) the clone verifies TLS against
+   *  (`git -c http.sslCAInfo=...`) — for repos behind an internal CA.
+   *  Relative paths resolve against the declaring recipe's directory; the
+   *  file is copied into the build context.  Mutually exclusive with
+   *  `sslBypass` (pinning a CA and disabling verification contradict). */
+  caCert?: string;
   sslBypass?: boolean;
   inContainer?: { path: string };
   /** Extra apt packages this source needs in the runtime image (e.g.
@@ -480,6 +499,53 @@ function validateDependsOn(value: unknown, label: string): void {
   );
 }
 
+/** Userinfo usernames are spliced into a double-quoted shell word inside a
+ *  generated Dockerfile RUN line — restrict to URL-userinfo-safe characters
+ *  that are also inert in double quotes (no `$`, backtick, `"`, `\`, spaces).
+ *  Covers GitLab deploy-token usernames (`gitlab+deploy-token-42`). */
+const AUTH_USERNAME_RE = /^[A-Za-z0-9._~+-]+$/;
+/** The CA bundle's basename becomes a Dockerfile COPY source and a
+ *  `-c http.sslCAInfo=` value — keep it shell/COPY-inert. */
+const CA_CERT_BASENAME_RE = /^[A-Za-z0-9._-]+$/;
+
+/** Shared validation for the cook-only auth/TLS fields on a git source
+ *  (`mcpServers.*.source` and `extensions.*.source`). Cook-owned — not in
+ *  upstream's validateRecipe. */
+function validateGitSourceAuthFields(src: Record<string, unknown>, label: string): void {
+  if (src.authUsername !== undefined) {
+    if (typeof src.authUsername !== 'string' || !AUTH_USERNAME_RE.test(src.authUsername)) {
+      throw new Error(
+        `${label}.authUsername must be a string of [A-Za-z0-9._~+-] characters ` +
+        `(it is embedded in the clone URL's userinfo inside a generated shell command)`,
+      );
+    }
+    if (src.authSecret === undefined) {
+      throw new Error(
+        `${label}.authUsername is only meaningful together with authSecret — ` +
+        `set authSecret (the token) or drop authUsername`,
+      );
+    }
+  }
+  if (src.caCert !== undefined) {
+    if (typeof src.caCert !== 'string' || !src.caCert) {
+      throw new Error(`${label}.caCert must be a non-empty string (path to a CA bundle file)`);
+    }
+    if (!CA_CERT_BASENAME_RE.test(basename(src.caCert))) {
+      throw new Error(
+        `${label}.caCert filename "${basename(src.caCert)}" must contain only ` +
+        `[A-Za-z0-9._-] characters (it becomes a Dockerfile COPY target) — rename the file`,
+      );
+    }
+    if (src.sslBypass === true) {
+      throw new Error(
+        `${label}: caCert and sslBypass are contradictory — caCert pins the CA the ` +
+        `clone verifies TLS against, sslBypass disables verification. Drop sslBypass ` +
+        `(caCert makes it unnecessary).`,
+      );
+    }
+  }
+}
+
 export function validateRecipe(raw: unknown): Recipe {
   if (!raw || typeof raw !== 'object') throw new Error('Recipe must be a JSON object');
   const obj = raw as Record<string, unknown>;
@@ -556,6 +622,7 @@ export function validateRecipe(raw: unknown): Recipe {
             throw new Error(`extensions.${name}.source.systemPackages must be an array of Debian package names`);
           }
         }
+        validateGitSourceAuthFields(src, `extensions.${name}.source`);
       }
       if (ext.kind === 'strategy') hasStrategyExtension = true;
     }
@@ -671,6 +738,7 @@ export function validateRecipe(raw: unknown): Recipe {
           if (src.sslBypass !== undefined && typeof src.sslBypass !== 'boolean') {
             throw new Error(`mcpServers.${id}.source.sslBypass must be a boolean`);
           }
+          validateGitSourceAuthFields(src, `mcpServers.${id}.source`);
           if (src.systemPackages !== undefined) {
             // Kept verbatim in sync with connectome-host src/recipe.ts. The
             // regex bounds these to Debian package names — they're pasted into

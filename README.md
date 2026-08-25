@@ -77,6 +77,44 @@ strategies and agent-framework modules — via the `extensions` block
   `node_modules` — `extends AutobiographicalStrategy` resolves against the
   exact versions the host ships.
 
+### Private git sources (tokens, usernames, internal CAs)
+
+For sources cloned from private/internal git servers, the `source` block
+takes four auth/TLS fields:
+
+```jsonc
+"source": {
+  "url": "https://git.internal/team/notion-mcp.git",
+  "install": "pip-editable",
+  "authSecret": "GITLAB_DEPLOY_TOKEN",            // env var holding the token
+  "authUsername": "gitlab+deploy-token-42",       // clone userinfo; default "oauth2"
+  "caCert": "./certs/internal-ca.crt"             // pin TLS to this CA bundle
+}
+```
+
+- **`authSecret`** — name of the env var holding the clone token. Docker
+  builds read it as a BuildKit secret (`$(cat /run/secrets/NAME)` inline in
+  the clone URL — never in the image or the environment); host installs
+  read it from resolved values / the environment and scrub it from
+  `.git/config` after the clone.
+- **`authUsername`** — the username half of the clone URL's userinfo.
+  Defaults to `oauth2` (GitLab PATs). GitLab **deploy tokens** — the
+  least-privilege option for build-time clones — authenticate with their
+  own username (e.g. `gitlab+deploy-token-42`), so they need this field.
+  Restricted to `[A-Za-z0-9._~+-]` (it is spliced into a generated shell
+  command).
+- **`caCert`** — path to a CA bundle (PEM) for servers behind an internal
+  CA. Relative paths resolve against the declaring recipe's directory, and
+  the file must exist at cook time. Docker builds copy it into the build
+  context at `ca-certs/<basename>` and every clone of that source runs
+  `git -c http.sslCAInfo=/tmp/cook-ca/<basename>`; host installs point git
+  at the operator's file directly. Scope is **per-source**: the `ch-deps`
+  clone of connectome-host (`CH_REPO_URL`) is not affected.
+- **`sslBypass`** — legacy escape hatch: disables TLS verification for the
+  clone (`-c http.sslVerify=false`). With `authSecret` this sends the token
+  over unverified TLS — prefer `caCert`. Declaring both is a validation
+  error (they contradict).
+
 ### Host requirements (discovery)
 
 For code that must link against things already on the machine:

@@ -17,6 +17,7 @@
  * their own final confirm-before-write gates).
  */
 
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { log } from './log.js';
 import type {
@@ -93,6 +94,26 @@ export interface InstallPlan {
 export type PlanResult =
   | { ok: true; plan: InstallPlan }
   | { ok: false; exitCode: number };
+
+/** Log an error for every source whose `caCert` bundle doesn't exist on
+ *  disk (the detector already resolved the path against the declaring
+ *  recipe's directory). Returns true when anything is missing. Shared
+ *  between resolvePlan and `cook check` — check doesn't build a plan but
+ *  must still catch a bad CA path before the operator trusts the report. */
+export function reportMissingCaCerts(sources: McpSource[]): boolean {
+  let missing = false;
+  for (const source of sources) {
+    if (!source.caCert || existsSync(source.caCert)) continue;
+    const ref = source.refs[0];
+    log.error(
+      `${ref ? `${ref.recipePath} :: ${ref.mcpServerName}` : source.key}: ` +
+      `source.caCert not found at ${source.caCert} — the CA bundle must exist at ` +
+      `cook time (relative paths resolve against the declaring recipe's directory).`,
+    );
+    missing = true;
+  }
+  return missing;
+}
 
 /**
  * Resolve a recipe into an InstallPlan. Interactive unless opts.noPrompts.
@@ -181,6 +202,12 @@ export async function resolvePlan(
     log.error(err instanceof Error ? err.message : String(err));
     return { ok: false, exitCode: 2 };
   }
+
+  // TLS-pinned clones: the CA bundle must exist on this machine at cook
+  // time (it is copied into the build context / handed to git directly).
+  // Fail fast before any backend work — mirrors the local-extension
+  // entry-file existence check. `cook check` runs the same helper.
+  if (reportMissingCaCerts(sources)) return { ok: false, exitCode: 2 };
 
   // Resolve required env values.  Precedence: --env-file > process.env > prompts.
   // (Single source-of-truth — see prompts.ts::resolveValue.)

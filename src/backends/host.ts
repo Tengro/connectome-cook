@@ -95,6 +95,11 @@ export interface CloneAction {
   buildCommand: string;
   /** Env var holding a private-clone token, when declared. */
   authSecret?: string;
+  /** Clone userinfo username (default `oauth2`) — see McpSource.authUsername. */
+  authUsername?: string;
+  /** Absolute host path to a CA bundle the clone verifies TLS against.
+   *  On host we point git straight at the operator's file — no copy. */
+  caCert?: string;
   sslBypass?: boolean;
 }
 
@@ -183,6 +188,8 @@ export function planHostActions(plan: InstallPlan, options: HostBackendOptions):
       buildCommand: hostBuildCommand(source),
       ...(source.commit !== undefined ? { commit: source.commit } : {}),
       ...(source.authSecret !== undefined ? { authSecret: source.authSecret } : {}),
+      ...(source.authUsername !== undefined ? { authUsername: source.authUsername } : {}),
+      ...(source.caCert !== undefined ? { caCert: source.caCert } : {}),
       ...(source.sslBypass !== undefined ? { sslBypass: source.sslBypass } : {}),
     });
   }
@@ -207,7 +214,10 @@ export function renderActionPreview(actions: HostActions, options: HostBackendOp
     const refLabel = c.ref && c.ref !== 'main' ? `@${c.ref}` : '';
     lines.push(`  - ${c.url}${refLabel} → ${c.target}`);
     if (c.buildCommand) lines.push(`      then run: ${c.buildCommand}`);
-    if (c.authSecret) lines.push(`      (private clone: token from $${c.authSecret})`);
+    if (c.authSecret) {
+      lines.push(`      (private clone: ${c.authUsername ?? 'oauth2'} + token from $${c.authSecret})`);
+    }
+    if (c.caCert) lines.push(`      (TLS pinned to CA bundle: ${c.caCert})`);
   }
   for (const c of actions.copies) {
     lines.push(`  - COPY ${c.from} → ${c.target} (sibling checkout)`);
@@ -255,9 +265,11 @@ export function isSatisfiedByLock(
 }
 
 /** Clone URL with an optional token (resolved values > environment; never
- *  logged). The credentialed form is briefly visible in the process list
- *  during the clone; executeClone scrubs it from .git/config afterwards. */
-function cloneUrlFor(action: CloneAction, values: Record<string, string>): string {
+ *  logged). Userinfo username is `authUsername` (default `oauth2` — GitLab
+ *  PATs; deploy tokens carry their own username). The credentialed form is
+ *  briefly visible in the process list during the clone; executeClone
+ *  scrubs it from .git/config afterwards. Exported for tests. */
+export function cloneUrlFor(action: CloneAction, values: Record<string, string>): string {
   if (!action.authSecret) return action.url;
   const token = values[action.authSecret] ?? process.env[action.authSecret];
   if (!token) {
@@ -266,7 +278,8 @@ function cloneUrlFor(action: CloneAction, values: Record<string, string>): strin
       `(supply via prompt, --env-file, or the environment)`,
     );
   }
-  return action.url.replace(/^https?:\/\//, (m) => `${m}oauth2:${token}@`);
+  const username = action.authUsername ?? 'oauth2';
+  return action.url.replace(/^https?:\/\//, (m) => `${m}${username}:${token}@`);
 }
 
 /** Execute one clone+build action. Throws on failure; the caller removes
@@ -275,7 +288,13 @@ function executeClone(action: CloneAction, values: Record<string, string>): { co
   rmSync(action.target, { recursive: true, force: true });
   mkdirSync(resolve(action.target, '..'), { recursive: true });
 
-  const sslArgs = action.sslBypass ? ['-c', 'http.sslVerify=false'] : [];
+  // caCert wins over sslBypass (the validator rejects both together, but
+  // verified TLS is strictly safer should a hand-built action carry both).
+  const sslArgs = action.caCert
+    ? ['-c', `http.sslCAInfo=${action.caCert}`]
+    : action.sslBypass
+      ? ['-c', 'http.sslVerify=false']
+      : [];
   log.step(`cloning ${log.dim(action.url)}${action.ref !== 'main' ? `@${action.ref}` : ''} → ${log.dim(action.target)}`);
   execFileSync('git', [...sslArgs, 'clone', cloneUrlFor(action, values), action.target], {
     stdio: ['ignore', 'inherit', 'inherit'],

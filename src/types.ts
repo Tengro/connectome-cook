@@ -66,6 +66,15 @@ export interface McpSource {
   /** Name of the env var holding a secret consumed by the install step
    *  (e.g. `ZULIP_TOKEN` for a private-repo clone). */
   authSecret?: string;
+  /** Username for the credentialed clone's URL userinfo — default `oauth2`
+   *  (GitLab PATs). GitLab deploy tokens need their own username, e.g.
+   *  `gitlab+deploy-token-42`. Only meaningful with `authSecret`. */
+  authUsername?: string;
+  /** Absolute host path to a CA bundle (PEM) the clone verifies TLS against
+   *  (resolved from the recipe-relative `source.caCert`). Backends copy it
+   *  into the build context (docker) or point git at it directly (host);
+   *  mutually exclusive with `sslBypass`. */
+  caCert?: string;
   /** Whether to tolerate self-signed TLS during `git clone` (internal servers). */
   sslBypass?: boolean;
   /** Absolute path inside the image where the source lives after install. */
