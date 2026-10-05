@@ -391,6 +391,30 @@ describe('detectSources — uvx is also skipped', () => {
   });
 });
 
+describe('detectSources — websocket servers need no build', () => {
+  test('a url-only (websocket) server is skipped in both modes', () => {
+    const walks: WalkResult[] = [
+      {
+        path: '/r/ws.json',
+        recipe: {
+          name: 'w',
+          agent: { systemPrompt: 'p' },
+          mcpServers: {
+            roadmaper: {
+              url: 'wss://roadmaper.dev/mcpl',
+              transport: 'websocket',
+              token: '${ROADMAPER_TOKEN:-}',
+            },
+          },
+        } as Recipe,
+      },
+    ];
+
+    expect(detectSources(walks, { strict: true })).toEqual([]);
+    expect(detectSources(walks, { strict: false })).toEqual([]);
+  });
+});
+
 describe('detectSources — npm-registry source', () => {
   test('an npx command WITH a source.npm becomes one deduplicated npm-global source', () => {
     const mk = (path: string): WalkResult => ({

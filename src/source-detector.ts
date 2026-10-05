@@ -160,8 +160,11 @@ export function detectSources(
         continue;
       }
 
-      // No source block. Either skip (npx/uvx) or fall through to unresolved.
+      // No source block. Either skip (npx/uvx, or a remote websocket server
+      // that the host dials and nothing has to be built) or fall through to
+      // unresolved.
       if (isRuntimeFetchCommand(server.command)) continue;
+      if (isRemoteWebSocketServer(server)) continue;
       unresolved.push({ recipePath: walk.path, mcpServerName: serverName });
     }
   }
@@ -192,6 +195,17 @@ export function detectSources(
  */
 function isRuntimeFetchCommand(command: string | undefined): boolean {
   return command === 'npx' || command === 'uvx';
+}
+
+/**
+ * A websocket MCPL server (`url` set, no `command`) is dialed by the host at
+ * runtime — there is no checkout to clone, build, or copy next to the recipe.
+ * Treating it as unresolved would demand a sibling checkout that can never
+ * exist (`sibling checkout not found: <recipe-dir>/<name>`).
+ */
+function isRemoteWebSocketServer(server: { command?: string; url?: string; transport?: string }): boolean {
+  if (server.command) return false;
+  return typeof server.url === 'string' && server.url.length > 0;
 }
 
 /**
