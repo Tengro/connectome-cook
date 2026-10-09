@@ -8,7 +8,7 @@
  *
  * Output layout (sections separated by `# --- <heading> ---` rules):
  *   1. Header comment naming the parent recipe.
- *   2. Required — the Anthropic credential (always; connectome-host/membrane
+ *   2. Required — the Anthropic credential (unless explicitly Codex-only; connectome-host/membrane
  *      read it directly from process.env, not via recipe substitution).
  *      Either ANTHROPIC_API_KEY (emitted uncommented) or ANTHROPIC_AUTH_TOKEN
  *      (long-lived OAuth bearer; emitted as a commented alternative) satisfies
@@ -40,6 +40,7 @@
  */
 
 import type { GeneratorInput, EnvVar, McpSource } from '../types.js';
+import { requiresAnthropicCredential } from '../prompts.js';
 
 /**
  * Names matching any of these patterns are treated as optional and emitted
@@ -128,13 +129,13 @@ function buildBuildTimeSecretsSection(sources: McpSource[]): string[] {
   return lines;
 }
 
-/** Required section: always-present Anthropic credential + non-optional recipe vars. */
-function buildRequiredSection(envVars: EnvVar[]): string[] {
+/** Required section: provider credential + non-optional recipe vars. */
+function buildRequiredSection(envVars: EnvVar[], input: GeneratorInput): string[] {
   const lines: string[] = [];
   lines.push('# --- Required ---');
   lines.push('');
 
-  // Always: the Anthropic credential. Even if the recipes don't reference
+  // For trees that require Anthropic auth, even if recipes don't reference
   // ${ANTHROPIC_API_KEY} / ${ANTHROPIC_AUTH_TOKEN}, connectome-host and
   // membrane read them directly from process.env.
   //
@@ -176,7 +177,7 @@ function buildRequiredSection(envVars: EnvVar[]): string[] {
       lines.push(`ANTHROPIC_AUTH_TOKEN=${placeholderFor('ANTHROPIC_AUTH_TOKEN')}`);
       lines.push('');
     }
-  } else {
+  } else if (requiresAnthropicCredential(input.walks)) {
     // No explicit reference — either var satisfies the requirement; the API
     // key is the common case so it's the uncommented one.
     lines.push(
@@ -210,6 +211,11 @@ function buildRequiredSection(envVars: EnvVar[]): string[] {
     if (envVar.defaultValue !== undefined) continue;
     lines.push(describeUsage(envVar));
     lines.push(`${envVar.name}=${placeholderFor(envVar.name)}`);
+    lines.push('');
+  }
+
+  if (lines.length === 2) {
+    lines.push('# No required variables in this section. Check build-time secrets and notes below.');
     lines.push('');
   }
 
@@ -255,6 +261,12 @@ function buildNotesSection(input: GeneratorInput): string[] {
   lines.push(
     '#   for simple values) are picked up by docker-compose at container start.',
   );
+
+  if (input.walks.some((walk) => walk.recipe.agent.provider === 'openai-codex')) {
+    lines.push('# - Codex inference requires a codex executable on PATH, writable persistent CODEX_HOME,');
+    lines.push('#   and codex login in the runtime environment. This bundle does not supply these prerequisites.');
+    lines.push('#   Setting env values alone does not enable Codex inference.');
+  }
 
   // Per the design notes / example: if a recipe references GitLab, mention
   // the opt-out path. Detected by env-var presence, not by recipe scanning,
@@ -313,7 +325,7 @@ export function generateEnv(input: GeneratorInput): string {
   const operatorEnvVars = input.envVars.filter((v) => !runtimeOnly.has(v.name));
 
   // Sections, in order.
-  lines.push(...buildRequiredSection(operatorEnvVars));
+  lines.push(...buildRequiredSection(operatorEnvVars, input));
   lines.push(...buildBuildTimeSecretsSection(input.sources));
   lines.push(...buildOptionalSection(operatorEnvVars));
   lines.push(...buildNotesSection(input));

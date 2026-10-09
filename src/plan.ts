@@ -119,6 +119,13 @@ export async function resolvePlan(
     return { ok: false, exitCode: 2 };
   }
 
+  if (walks.some((walk) => walk.recipe.agent.provider === 'openai-codex')) {
+    log.warn(
+      'Codex inference requires a codex executable on PATH, writable persistent CODEX_HOME, ' +
+      'and codex login in the runtime environment. Cook does not supply these prerequisites.',
+    );
+  }
+
   // Every backend copies walked recipes flat into <out>/recipes/, so two
   // sources sharing a shipped filename would silently overwrite each other
   // (and the rewritten fleet child refs would point both children at the
@@ -198,7 +205,7 @@ export async function resolvePlan(
       .flatMap((tf) => tf.runtimeVars ?? []),
   );
   const envVarsForOperator = envVars.filter((v) => !runtimeOnlyVars.has(v.name));
-  const required = deriveRequiredVars(envVarsForOperator, sources, sidecarSecretNames);
+  const required = deriveRequiredVars(envVarsForOperator, sources, sidecarSecretNames, walks);
   let envFileValues: Record<string, string> = {};
   if (opts.envFile) {
     try {

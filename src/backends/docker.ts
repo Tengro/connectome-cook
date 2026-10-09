@@ -10,7 +10,7 @@
  */
 
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { log } from '../log.js';
 import type { BuildOptions, GeneratorInput } from '../types.js';
 import type { Recipe } from '../vendor/recipe.js';
@@ -126,9 +126,10 @@ export async function runDockerBackend(
     ) + '\n',
   }));
 
-  // Only write .env if we have values worth writing — otherwise the
-  // operator gets only .env.example to copy/edit themselves.
-  const writeEnvFile = Object.keys(collectedValues).length > 0;
+  // Compose always references .env. Create an empty file when absent,
+  // preserving an operator-owned file when no values were collected.
+  const writeEnvFile = Object.keys(collectedValues).length > 0
+    || !existsSync(join(outDir, '.env'));
 
   // Credential files we have AT LEAST ONE value for; complete-skip files
   // get omitted so the operator notices via the warn rather than getting
