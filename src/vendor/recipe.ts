@@ -1,7 +1,9 @@
 /**
  * Vendored from connectome-host: forking-knowledge-miner/src/recipe.ts
  * Sync source: github.com/anima-research/connectome-host
- * Last synced: feat/recipe-extensions branch (recipe `extensions` block —
+ * Partial update: agent.provider added for conservative provider-auth planning.
+ * This is not a full schema sync; the earlier sync notes below still apply.
+ * Earlier sync: feat/recipe-extensions branch (recipe `extensions` block —
  *              custom strategies/modules via local imports; strategy.type
  *              widened to admit extension-registered names).
  *              Earlier: feat/sidecar-services branch (sidecar `services` + `templateFiles`).
@@ -27,7 +29,7 @@
  *   - resolveRecipeRelative() — parent-dir-relative path resolution helper,
  *     used by walker.ts to traverse fleet children
  *
- * Two deliberate divergences from upstream:
+ * Deliberate divergences from upstream:
  *
  *   1. We expose loadRecipeRaw() instead of loadRecipe(). Cook needs to scan
  *      raw recipe JSON for ${VAR} patterns BEFORE substitution (so we can
@@ -40,6 +42,12 @@
  *      @animalabs/agent-framework, a runtime-only dep) to `Record<string,
  *      unknown>`. Cook only cares whether wake is enabled, not its config
  *      shape.
+ *
+ *   3. RecipeAgent.provider stays an optional string, and validateRecipe()
+ *      does not validate provider values. Upstream uses a seven-value union
+ *      and rejects unrecognized providers. Cook conservatively requires
+ *      Anthropic credentials for every provider except explicit openai-codex;
+ *      accepting an unrecognized value here does not establish host support.
  */
 
 import { readFileSync, existsSync } from 'node:fs';

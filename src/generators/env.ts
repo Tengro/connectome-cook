@@ -214,6 +214,11 @@ function buildRequiredSection(envVars: EnvVar[], input: GeneratorInput): string[
     lines.push('');
   }
 
+  if (lines.length === 2) {
+    lines.push('# No required variables in this section. Check build-time secrets and notes below.');
+    lines.push('');
+  }
+
   return lines;
 }
 

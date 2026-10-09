@@ -114,14 +114,22 @@ describe('provider auth — planner and generated env', () => {
     const { out, warnings, plan } = await check('openai-codex', 'stub', 'openai-codex');
     expect(plan.walks).toHaveLength(2);
     expect(out).not.toContain('ANTHROPIC_');
+    expect(out).toContain('# No required variables in this section. Check build-time secrets and notes below.');
+    expect(out).toContain('writable persistent CODEX_HOME');
+    expect(out).toContain('codex login');
     expect(warnings).toEqual([]);
   });
 
   for (const provider of [undefined, 'anthropic', 'unknown-route']) {
-    test(`provider ${provider ?? '(omitted)'} retains either/or requirement`, async () => {
+    // Unknown routes are defensive Cook inputs; the host rejects them.
+    const label = provider === 'unknown-route'
+      ? 'defensive Cook input unknown-route (unsupported by host)'
+      : `provider ${provider ?? '(omitted)'}`;
+    test(`${label} retains either/or requirement`, async () => {
       const { out, warnings } = await check(provider);
       expect(out).toMatch(/^ANTHROPIC_API_KEY=/m);
       expect(out).toMatch(/^# ANTHROPIC_AUTH_TOKEN=/m);
+      expect(out).not.toContain('No required variables in this section.');
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain('1 required value');
     });
@@ -138,6 +146,7 @@ describe('provider auth — planner and generated env', () => {
     test(`Codex explicit ${name} is required by exact name`, async () => {
       const { out, warnings, plan } = await check('openai-codex', '${' + name + '}');
       expect(out).toMatch(new RegExp(`^${name}=`, 'm'));
+      expect(out).not.toContain('No required variables in this section.');
       expect(warnings[0]).toContain('1 required value');
       // Exact references cannot be satisfied by the other credential.
       const other = name === 'ANTHROPIC_API_KEY' ? 'ANTHROPIC_AUTH_TOKEN' : 'ANTHROPIC_API_KEY';
@@ -149,6 +158,10 @@ describe('provider auth — planner and generated env', () => {
       const { out, warnings, plan } = await check('openai-codex', '${' + name + ':-fixture-default}');
       expect(out).toMatch(new RegExp(`^# ${name}=fixture-default$`, 'm'));
       expect(out).not.toMatch(new RegExp(`^${name}=`, 'm'));
+      expect(out).toContain('# No required variables in this section. Check build-time secrets and notes below.');
+      expect(out).toContain('# --- Optional ---');
+      expect(out).toContain('writable persistent CODEX_HOME');
+      expect(out).toContain('codex login');
       // Existing noPrompts behavior also warns for missing optional references.
       expect(warnings[0]).toContain('1 required value');
       const required = deriveRequiredVars(plan.envVars, [], [], plan.walks);
@@ -162,6 +175,8 @@ describe('provider auth — planner and generated env', () => {
     const { out, warnings } = await check('openai-codex', 'stub', undefined, true);
     expect(out).not.toContain('ANTHROPIC_');
     expect(out).toMatch(/^BUILD_SECRET=/m);
+    expect(out).toContain('# --- Build-time secrets ---');
+    expect(out).toContain('# No required variables in this section. Check build-time secrets and notes below.');
     expect(warnings[0]).toContain('2 required values');
   });
 });
